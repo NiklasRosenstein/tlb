@@ -8,14 +8,17 @@ run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
 [tasks.fmt-check]
 run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 120 --check"
 
-[tasks.test]
-run = "cargo test --all-features"
-
 [tasks.lint]
+wait_for = ["fmt-check", "fmt"]
 run = "cargo clippy --all-features -- -D warnings"
 
 [tasks.build]
+wait_for = ["lint"]
 run = "cargo build --all-features"
+
+[tasks.test]
+wait_for = ["build"]
+run = "cargo test --all-features"
 
 [tasks.ci]
 depends = ["fmt-check", "lint", "test", "build"]
