@@ -6,14 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Define a cluster-scoped tunnel class.
 ///
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[kube(
-    group = "tlb.io",
-    version = "v1alpha1",
-    kind = "ClusterTunnelClass",
-    namespaced
-)]
+#[kube(group = "tlb.io", version = "v1alpha1", kind = "ClusterTunnelClass")]
 pub struct ClusterTunnelClassSpec {
-    pub netbird: Option<NetbirdConfig>,
+    #[serde(flatten)]
+    pub inner: TunnelClassInnerSpec,
 }
 
 ///
@@ -27,6 +23,16 @@ pub struct ClusterTunnelClassSpec {
     namespaced
 )]
 pub struct TunnelClassSpec {
+    #[serde(flatten)]
+    pub inner: TunnelClassInnerSpec,
+}
+
+///
+/// The inner structure that is shared between [`TunnelClassSpec`] and [`ClusterTunnelClassSpec`].
+///
+#[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelClassInnerSpec {
     pub netbird: Option<NetbirdConfig>,
 }
 
@@ -34,11 +40,9 @@ pub struct TunnelClassSpec {
 /// Configuration for creating Netbird tunnels.
 ///
 #[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct NetbirdConfig {
-    #[serde(rename = "managementURL")]
     pub management_url: String,
-
-    #[serde(rename = "setupKeyRef")]
     pub setup_key_ref: SeretKeyRef,
 }
 
@@ -47,6 +51,7 @@ pub struct NetbirdConfig {
 /// otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
 ///
 #[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SeretKeyRef {
     pub name: String,
     pub namespace: Option<String>,
