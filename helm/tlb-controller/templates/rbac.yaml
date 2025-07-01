@@ -22,31 +22,33 @@ rules:
   - apiGroups: [""]
     resources:
       - namespaces
-      - services
     verbs:
       - get
       - list
-      - watch
   - apiGroups: [""]
     resources:
       - services
     verbs:
-      - update
+      - get
+      - list
+  - apiGroups: [""]
+    resources:
+      - services/status
+    verbs:
       - patch
   - apiGroups: ["events.k8s.io"]
     resources:
       - events
     verbs:
       - create
+      - patch
   - apiGroups: ["apps"]
     resources:
       - deployments
     verbs:
       - get
       - create
-      - update
       - patch
-      - watch
   - apiGroups: ["tlb.io"]
     resources:
       - clustertunnelclasses
