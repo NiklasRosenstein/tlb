@@ -1,0 +1,5 @@
+[tools]
+rust = "1.87"
+
+[tasks.fmt]
+run = "cargo fmt --all && deno fmt README.md --line-width 120"

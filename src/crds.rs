@@ -16,12 +16,7 @@ pub struct ClusterTunnelClassSpec {
 /// Define a namespaced tunnel class.
 ///
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
-#[kube(
-    group = "tlb.io",
-    version = "v1alpha1",
-    kind = "TunnelClass",
-    namespaced
-)]
+#[kube(group = "tlb.io", version = "v1alpha1", kind = "TunnelClass", namespaced)]
 pub struct TunnelClassSpec {
     #[serde(flatten)]
     pub inner: TunnelClassInnerSpec,
@@ -43,6 +38,11 @@ pub struct TunnelClassInnerSpec {
 #[serde(rename_all = "camelCase")]
 pub struct NetbirdConfig {
     pub management_url: String,
+    /// The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is
+    /// used so we can know the full domain name when using the `tlb.io/dns` annotation. If the
+    /// name specified in the annotation is suffixed with this domain, it will be stripped as
+    /// Netbird will automatically append it.
+    pub netbird_dns_domain: Option<String>,
     pub setup_key_ref: SeretKeyRef,
 }
 

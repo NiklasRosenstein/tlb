@@ -6,8 +6,8 @@ routing configurations.
 
 ## Usage
 
-After installing TLB, you define your own `TunnelClass` or `ClusterTunnelClass` resources that can be referenced
-in a `Service`'s `loadBalancerClass`.
+After installing TLB, you define your own `TunnelClass` or `ClusterTunnelClass` resources that can be referenced in a
+`Service`'s `loadBalancerClass`.
 
 ```yaml
 apiVersion: tlb.io/v1alpha1
@@ -64,3 +64,16 @@ spec:
   `kubernetes.io/hostname`.
 - `tlb.io/node-selector`: A comma-separated list of node labels to select nodes for the tunnel. This is useful for
   targeting specific nodes in your cluster.
+
+## Work in progress
+
+- [x] Basic controller loop
+- [ ] Skip reconciling cluster-scoped tunnel class if same-named namespaced tunnel class exists
+- [ ] Netbird support
+  - [x] Creation of `Deployment` resources for matching `Service` resources
+  - [x] Population of `Service.spec.loadBalancerStatus` with the first DNS name specified in the `tlb.io/dns` annotation
+  - [x] Support for `tlb.io/dns`
+  - [x] Support for `tlb.io/replicas`
+  - [ ] Support for `tlb.io/topology-key`
+  - [ ] Support for `tlb.io/node-selector`
+  - [ ] Cleanup on `Service` change or deletion
