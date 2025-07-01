@@ -23,7 +23,7 @@ impl SimpleEventRecorder {
     /// Creates a new `SimpleEventRecorder` from a Kubernetes client and a reporter.
     ///
     /// # Example
-    /// ```rust
+    /// ```no_run
     /// #[tokio::main]
     /// async fn main() {
     ///     use tlb::simpleevent::SimpleEventRecorder;
