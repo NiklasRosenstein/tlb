@@ -243,9 +243,10 @@ pub async fn reconcile_netbird_service(
         }
     };
 
+    let deployment_name = format!("tunnel-{}", svc_name);
     let deployment = Deployment {
         metadata: ObjectMeta {
-            name: Some(format!("{}-netbird", svc_name)),
+            name: Some(deployment_name.clone()),
             namespace: Some(deployment_namespace.clone()),
             owner_references: Some(owner_references),
             ..Default::default()
@@ -288,13 +289,13 @@ pub async fn reconcile_netbird_service(
     };
 
     // Try to fetch the existing deployment
-    match deployment_api.get_opt(&format!("{}-netbird", svc_name)).await? {
+    match deployment_api.get_opt(&deployment_name).await? {
         Some(_existing) => {
             // Patch the deployment if it exists (server-side apply)
             use kube::api::{Patch, PatchParams};
             deployment_api
                 .patch(
-                    &format!("{}-netbird", svc_name),
+                    &deployment_name,
                     &PatchParams::apply("tlb-controller").force(),
                     &Patch::Apply(&deployment),
                 )

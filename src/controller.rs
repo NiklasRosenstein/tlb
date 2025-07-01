@@ -150,7 +150,7 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                 OwnerReference {
                     api_version: "v1".into(),
                     kind: "Service".into(),
-                    name: format!("{svc_name}-netbird-tunnel"),
+                    name: svc_name.clone(),
                     uid: service.metadata.uid.clone().unwrap_or_default(),
                     controller: Some(false),
                     block_owner_deletion: Some(true),
