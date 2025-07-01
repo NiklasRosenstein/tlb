@@ -68,6 +68,7 @@ spec:
 ## Work in progress
 
 - [x] Basic controller loop
+- [ ] Use Kubernetes Watch API to watch for changes
 - [ ] Skip reconciling cluster-scoped tunnel class if same-named namespaced tunnel class exists
 - [ ] Netbird support
   - [x] Creation of `Deployment` resources for matching `Service` resources
@@ -77,5 +78,6 @@ spec:
   - [x] Support for `tlb.io/topology-key`
   - [x] Support for `tlb.io/node-selector`
   - [ ] Cleanup on `Service` change or deletion
+  - [ ] Update `Deployment` on `Service` only when they actually changed
 - [ ] Cloudflare support
 - [ ] Tailscale support

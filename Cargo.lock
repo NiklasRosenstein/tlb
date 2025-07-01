@@ -1752,6 +1752,7 @@ dependencies = [
  "env_logger",
  "k8s-openapi",
  "kube",
+ "kube-client",
  "log",
  "schemars",
  "serde",

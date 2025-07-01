@@ -44,6 +44,8 @@ pub struct NetbirdConfig {
     /// Netbird will automatically append it.
     pub netbird_dns_domain: Option<String>,
     pub setup_key_ref: SeretKeyRef,
+    /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
+    pub image: Option<String>,
 }
 
 ///
