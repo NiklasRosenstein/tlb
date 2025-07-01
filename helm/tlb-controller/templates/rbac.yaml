@@ -33,7 +33,7 @@ rules:
     verbs:
       - update
       - patch
-  - apiGroups: [""]
+  - apiGroups: ["events.k8s.io"]
     resources:
       - events
     verbs:
