@@ -2,4 +2,19 @@
 rust = "1.87"
 
 [tasks.fmt]
-run = "cargo fmt --all && deno fmt README.md --line-width 120"
+run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
+
+[tasks.fmt-check]
+run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 120 --check"
+
+[tasks.test]
+run = "cargo test --all-features"
+
+[tasks.lint]
+run = "cargo clippy --all-features -- -D warnings"
+
+[tasks.build]
+run = "cargo build --all-features"
+
+[tasks.ci]
+depends = ["fmt-check", "lint", "test", "build"]
