@@ -1,5 +1,5 @@
 [tools]
-rust = {version = "1.87", profile = "default"}
+rust = {version = "1.87", components = "rustfmt,clippy"}
 
 [tasks.fmt]
 run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"

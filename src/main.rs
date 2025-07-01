@@ -7,12 +7,12 @@ mod crds;
 #[derive(Parser, Debug)]
 struct Args {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run the controller.
+    /// Run the controller. This is the default command if no subcommand is specified.
     Run {},
 
     /// Generate the CRDs.
@@ -24,10 +24,13 @@ async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
     match args.command {
-        Command::Run {} => {
+        None => {
             crate::controller::run().await;
         }
-        Command::Crds {} => {
+        Some(Command::Run {}) => {
+            crate::controller::run().await;
+        }
+        Some(Command::Crds {}) => {
             print!(
                 "---\n{}",
                 serde_yaml::to_string(&crate::crds::TunnelClass::crd()).unwrap()
