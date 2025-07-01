@@ -42,7 +42,7 @@ pub struct ServiceAnnotations {
     pub dns: Option<String>,
 
     /// The number of tunnel replicas to deploy. Defaults to 1.
-    pub replicas: Option<i32>,
+    pub replicas: i32,
 
     /// A topology key that can be used to spread the tunnel replicas across different nodes.
     /// Defaults to `kubernetes.io/hostname`.
@@ -56,7 +56,10 @@ impl From<BTreeMap<String, String>> for ServiceAnnotations {
     fn from(annotations: BTreeMap<String, String>) -> Self {
         // TODO: Can we use serde?
         let dns = annotations.get("tlb.io/dns").cloned();
-        let replicas = annotations.get("tlb.io/replicas").and_then(|s| s.parse().ok());
+        let replicas = annotations
+            .get("tlb.io/replicas")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
         let topology_key = annotations.get("tlb.io/topology-key").cloned();
         let node_selector = annotations.get("tlb.io/node-selector").cloned();
 

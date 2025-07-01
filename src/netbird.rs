@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::{
     api::{
-        apps::v1::{Deployment, DeploymentSpec},
+        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
         core::v1::{
             Affinity, Capabilities, Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
             SecurityContext, Service, ServicePort, ServiceStatus,
@@ -29,7 +29,7 @@ const DEFAULT_NETBIRD_ENTRYPOINT: &str = "/usr/local/bin/netbird up";
 /// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
 /// and launches the Netbird service.
 ///
-fn get_netbird_launch_script(service_ip: &String, ports: &Vec<ServicePort>) -> String {
+fn get_netbird_launch_script(service_ip: &String, ports: &[ServicePort]) -> String {
     let cluster_iface = DEFAULT_CLUSTER_INTERFACE;
     let netbird_iface = DEFAULT_NETBIRD_INTERFACE;
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
@@ -230,6 +230,19 @@ pub async fn reconcile_netbird_service(
         ..Default::default()
     };
 
+    // If there's only one replica, we need a different deployment strategy.
+    let deployment_strategy = if options.replicas == 1 {
+        DeploymentStrategy {
+            type_: Some("Recreate".into()),
+            rolling_update: None,
+        }
+    } else {
+        DeploymentStrategy {
+            type_: Some("RollingUpdate".into()),
+            rolling_update: None,
+        }
+    };
+
     let deployment = Deployment {
         metadata: ObjectMeta {
             name: Some(format!("{}-netbird", svc_name)),
@@ -238,11 +251,12 @@ pub async fn reconcile_netbird_service(
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
-            replicas: options.replicas,
+            replicas: Some(options.replicas),
             selector: LabelSelector {
                 match_labels: Some(match_labels.clone()),
                 ..Default::default()
             },
+            strategy: Some(deployment_strategy),
             template: PodTemplateSpec {
                 metadata: Some(ObjectMeta {
                     labels: Some(match_labels.clone()),

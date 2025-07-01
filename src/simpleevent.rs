@@ -23,9 +23,13 @@ impl SimpleEventRecorder {
     /// Creates a new `SimpleEventRecorder` from a Kubernetes client and a reporter.
     ///
     /// # Example
-    /// ```
-    /// let client = kube::Client::try_default().await?;
-    /// let events = SimpleEventRecorder::from_client(client, "my-controller");
+    /// ```rust
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     use tlb::simpleevent::SimpleEventRecorder;
+    ///     let client = kube::Client::try_default().await.unwrap();
+    ///     let events = SimpleEventRecorder::from_client(client, "my-controller");
+    /// }
     /// ```
     pub fn from_client<R: Into<Reporter>>(client: kube::Client, reporter: R) -> Self {
         let recorder = Recorder::new(client, reporter.into());
