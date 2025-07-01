@@ -1,28 +1,38 @@
 [tools]
-rust = { version = "1.87", profile = "default" }
+rust = {version = "1.87", profile = "default"}
 
 [tasks.fmt]
-tools.deno = "2"
 run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
+tools.deno = "2"
 
 [tasks.fmt-check]
-tools.deno = "2"
 run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 120 --check"
+tools.deno = "2"
 
 [tasks.lint]
-wait_for = ["fmt-check", "fmt"]
 run = "cargo clippy --all-features -- -D warnings"
+wait_for = ["fmt-check", "fmt"]
 
 [tasks.fix]
 run = "cargo clippy --all-features --fix --allow-dirty --allow-staged"
 
 [tasks.build]
-wait_for = ["lint"]
 run = "cargo build --all-features"
+wait_for = ["lint"]
 
 [tasks.test]
-wait_for = ["build"]
 run = "cargo test --all-features"
+wait_for = ["build"]
+
+[tasks.update-crds]
+depends = ["build"]
+run = "cargo run crds > ./helm/tlb-controller/templates/crds/crds.yaml"
+wait_for = ["build", "test"]
+
+[tasks.check-crds-uptodate]
+depends = ["build"]
+run = "bash -c 'diff -u helm/tlb-controller/templates/crds/crds.yaml <(cargo run crds)'"
+wait_for = ["build", "test"]
 
 [tasks.ci]
-depends = ["fmt-check", "lint", "test", "build"]
+depends = ["fmt-check", "lint", "test", "build", "check-crds-uptodate"]
