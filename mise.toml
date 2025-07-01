@@ -2,6 +2,7 @@
 rust = "1.87"
 
 [tasks.fmt]
+tools.deno = "2"
 run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
 
 [tasks.fmt-check]
