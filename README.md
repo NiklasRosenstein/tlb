@@ -77,3 +77,5 @@ spec:
   - [x] Support for `tlb.io/topology-key`
   - [x] Support for `tlb.io/node-selector`
   - [ ] Cleanup on `Service` change or deletion
+- [ ] Cloudflare support
+- [ ] Tailscale support
