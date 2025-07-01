@@ -74,6 +74,6 @@ spec:
   - [x] Population of `Service.spec.loadBalancerStatus` with the first DNS name specified in the `tlb.io/dns` annotation
   - [x] Support for `tlb.io/dns`
   - [x] Support for `tlb.io/replicas`
-  - [ ] Support for `tlb.io/topology-key`
-  - [ ] Support for `tlb.io/node-selector`
+  - [x] Support for `tlb.io/topology-key`
+  - [x] Support for `tlb.io/node-selector`
   - [ ] Cleanup on `Service` change or deletion

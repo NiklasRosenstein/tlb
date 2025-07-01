@@ -12,6 +12,9 @@ run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 12
 wait_for = ["fmt-check", "fmt"]
 run = "cargo clippy --all-features -- -D warnings"
 
+[tasks.fix]
+run = "cargo clippy --all-features --fix --allow-dirty --allow-staged"
+
 [tasks.build]
 wait_for = ["lint"]
 run = "cargo build --all-features"

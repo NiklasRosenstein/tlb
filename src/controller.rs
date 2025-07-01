@@ -4,8 +4,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            Capabilities, Container, EnvVar, EnvVarSource, Namespace, PodSpec, PodTemplateSpec, SecretKeySelector,
-            SecurityContext, Service, ServiceStatus,
+            Affinity, Capabilities, Container, EnvVar, EnvVarSource, Namespace, PodSpec, PodTemplateSpec,
+            SecretKeySelector, SecurityContext, Service, ServiceStatus,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference},
@@ -59,11 +59,9 @@ struct ServiceAnnotations {
 
     /// A topology key that can be used to spread the tunnel replicas across different nodes.
     /// Defaults to `kubernetes.io/hostname`.
-    #[allow(dead_code)]
     pub topology_key: Option<String>,
 
     /// A comma-separated list of node labels to use as node selectors for the tunnel pods.
-    #[allow(dead_code)]
     pub node_selector: Option<String>,
 }
 
@@ -322,6 +320,45 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                         .await?;
                 }
 
+                // Construct the node selector from the service annotations.
+                let node_selector: BTreeMap<String, String> = if let Some(node_selector_str) = &options.node_selector {
+                    node_selector_str
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter_map(|s| {
+                            let mut parts = s.splitn(2, '=');
+                            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                                Some((key.to_string(), value.to_string()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                } else {
+                    BTreeMap::new()
+                };
+
+                // Construct anti-affinity rules based on topology key.
+                let affinity = Affinity {
+                    pod_anti_affinity: Some(k8s_openapi::api::core::v1::PodAntiAffinity {
+                        required_during_scheduling_ignored_during_execution: Some(vec![
+                            k8s_openapi::api::core::v1::PodAffinityTerm {
+                                label_selector: Some(LabelSelector {
+                                    match_labels: Some(match_labels.clone()),
+                                    ..Default::default()
+                                }),
+                                topology_key: options
+                                    .topology_key
+                                    .clone()
+                                    .unwrap_or_else(|| "kubernetes.io/hostname".to_string()),
+                                ..Default::default()
+                            },
+                        ]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                };
+
                 let deployment = Deployment {
                     metadata: ObjectMeta {
                         name: Some(format!("{}-netbird", svc_name)),
@@ -362,8 +399,8 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                                 ..Default::default()
                             }),
                             spec: Some(PodSpec {
-                                // nodeSelector
-                                // podAntiAffinity
+                                node_selector: Some(node_selector),
+                                affinity: Some(affinity),
                                 containers: vec![Container {
                                     name: "netbird".into(),
                                     image: Some("netbirdio/netbird:latest".into()),
