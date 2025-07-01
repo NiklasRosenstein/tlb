@@ -2,8 +2,7 @@
 rust = { version = "1.87", profile = "default" }
 
 [tasks.fmt]
-tools.deno = "2"
-run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
+run = "cargo fmt --all && mise exec deno -- deno fmt README.md .github/ --line-width 120"
 
 [tasks.fmt-check]
 run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 120 --check"
