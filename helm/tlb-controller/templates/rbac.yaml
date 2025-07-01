@@ -42,6 +42,7 @@ rules:
     resources:
       - deployments
     verbs:
+      - get
       - create
       - update
       - patch
