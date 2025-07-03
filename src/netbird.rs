@@ -4,8 +4,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
         core::v1::{
-            Affinity, Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec,
-            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus,
+            Affinity, Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, LoadBalancerIngress, Pod, PodSpec,
+            PodTemplateSpec, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference},
@@ -13,17 +13,31 @@ use k8s_openapi::{
 use kube::{
     Api, Client, Resource,
     api::{ObjectMeta, Patch, PatchParams},
+    core::Selector,
     runtime::events::EventType,
 };
 use log::info;
 use serde_json::json;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    net::TcpStream,
+};
 
-use crate::{Error, Result, ServiceAnnotations, crds::NetbirdConfig, simpleevent::SimpleEventRecorder};
+use crate::{
+    Error, Result, ServiceAnnotations,
+    crds::{NetbirdAnnounceType, NetbirdConfig},
+    simpleevent::SimpleEventRecorder,
+};
 
 const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
 const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up";
+
+/// We prefer to expose the Netbird tunnel using the IP address of the Netbird peer, as this will work in most cases.
+/// Using the DNS name instead will require that the DNS server can resolve the Netbird domain, which is not always
+/// the case, especially when registering a CNAME entry for the Netbird tunnel in a public DNS server.
+const DEFAULT_ANNOUNCE_TYPE: NetbirdAnnounceType = NetbirdAnnounceType::IP;
 
 /// We launch a small TCP server on port `9999` to expose the Netbird peer IP.
 const NETBIRD_PEER_IP_PORT: u16 = 9999;
@@ -79,7 +93,7 @@ fn get_netbird_launch_script(
             peer_ip=$(ip addr show {netbird_iface} | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1); \
             echo \"[peer-ip-server] {netbird_iface} is up with ip $peer_ip, serving on port {NETBIRD_PEER_IP_PORT}...\"; \
             while true; do \
-                echo -n \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \
+                echo \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \
             done \
         ) &"
     ));
@@ -141,6 +155,7 @@ pub async fn reconcile_netbird_service(
     let deployment_namespace = netbird.setup_key_ref.namespace.unwrap_or(svc_namespace.clone());
 
     let deployment_api = Api::<Deployment>::namespaced(client.clone(), &deployment_namespace);
+    let pod_api = Api::<Pod>::namespaced(client.clone(), &deployment_namespace);
     let svc_api = Api::<Service>::namespaced(client.clone(), svc_namespace);
 
     // Labels to match on for the Deployment.
@@ -183,6 +198,7 @@ pub async fn reconcile_netbird_service(
         },
     ];
 
+    let mut announce_type = netbird.announce_type.unwrap_or(DEFAULT_ANNOUNCE_TYPE);
     let mut lb_ingress_host: Option<String> = None;
     if let Some(dns) = &options.dns {
         // Split the netbird DNS name.
@@ -207,21 +223,20 @@ pub async fn reconcile_netbird_service(
             value: Some(dns_names.join(",")),
             ..Default::default()
         });
-    } else {
+    } else if announce_type == NetbirdAnnounceType::DNS {
         events
             .publish(
                 &service.object_ref(&()),
                 EventType::Warning,
                 "MissingDNSAnnotation".into(),
-                Some(format!(
-                    "Service `{}` in namespace `{}` does not have the `tlb.io/dns` annotation set. \
-                                The controller cannot determine the IP addresses assigned to the tunnel peers,
-                                hence the LoadBalancer status will stay `Pending`.",
-                    svc_name, svc_namespace
-                )),
+                Some(
+                    "Missing `tlb.io/dns` annotation for `announceType: DNS`. Falling back to IP announcement."
+                        .to_string(),
+                ),
                 "Reconcile".into(),
             )
             .await?;
+        announce_type = NetbirdAnnounceType::IP;
     }
 
     // Construct the node selector from the service annotations.
@@ -340,7 +355,7 @@ pub async fn reconcile_netbird_service(
         ..Default::default()
     };
 
-    // Try to fetch the existing deployment
+    // Patch or create the deployment.
     match deployment_api.get_opt(&deployment_name).await? {
         Some(_existing) => {
             // Patch the deployment if it exists (server-side apply)
@@ -362,19 +377,33 @@ pub async fn reconcile_netbird_service(
         }
     }
 
+    // Find all pods that match the deployment's selector.
+    let pods = pod_api
+        .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels.into_iter())))
+        .await?;
+    let pod_netbird_ips = get_pod_netbird_peer_ips(pods.items, events).await?;
+    let lb_ingress: Vec<LoadBalancerIngress> = match announce_type {
+        NetbirdAnnounceType::IP => pod_netbird_ips
+            .into_iter()
+            .map(|ip| LoadBalancerIngress {
+                ip: Some(ip),
+                ..Default::default()
+            })
+            .collect(),
+        NetbirdAnnounceType::DNS => lb_ingress_host
+            .as_ref()
+            .map(|host| {
+                vec![k8s_openapi::api::core::v1::LoadBalancerIngress {
+                    hostname: Some(host.clone()),
+                    ..Default::default()
+                }]
+            })
+            .unwrap_or_default(),
+    };
+
     let status = ServiceStatus {
         load_balancer: Some(k8s_openapi::api::core::v1::LoadBalancerStatus {
-            ingress: Some(
-                lb_ingress_host
-                    .as_ref()
-                    .map(|host| {
-                        vec![k8s_openapi::api::core::v1::LoadBalancerIngress {
-                            hostname: Some(host.clone()),
-                            ..Default::default()
-                        }]
-                    })
-                    .unwrap_or_default(),
-            ),
+            ingress: Some(lb_ingress),
         }),
         ..Default::default()
     };
@@ -391,4 +420,106 @@ pub async fn reconcile_netbird_service(
     info!("Patched status for service `{}`", svc_name);
 
     Ok(())
+}
+
+/// Executes `ip addr show <netbird_interface>` on the pod's Netbird interface to get the Netbird peer IPs.
+async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) -> Result<Vec<String>> {
+    let mut peer_ips = Vec::new();
+
+    for pod in pods {
+        let pod_name = pod
+            .metadata
+            .name
+            .as_ref()
+            .ok_or_else(|| Error::UnexpectedError("Pod does not have a name".to_string()))?;
+
+        let pod_ready = pod
+            .status
+            .as_ref()
+            .map(|s| {
+                s.conditions
+                    .as_ref()
+                    .unwrap_or(&Vec::new())
+                    .iter()
+                    .any(|c| c.type_ == "Ready" && c.status == "True")
+            })
+            .unwrap_or(false);
+        if !pod_ready {
+            events
+                .publish(
+                    &pod.object_ref(&()),
+                    EventType::Warning,
+                    "PodNotReady".into(),
+                    Some(format!("Pod `{}` is not ready", pod_name)),
+                    "Reconcile".into(),
+                )
+                .await?;
+            continue;
+        };
+
+        let pod_ip = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.pod_ip.clone())
+            .ok_or_else(|| Error::UnexpectedError(format!("Pod `{}` does not have an IP", pod_name)))?;
+
+        // Attempt to connect to the Netbird peer IP server on the pod's IP and port.
+        info!(
+            "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{}` at {}:{}",
+            pod_name, pod_ip, NETBIRD_PEER_IP_PORT
+        );
+        let mut stream = match TcpStream::connect(format!("localhost:{NETBIRD_PEER_IP_PORT}",)).await {
+            // let mut stream = match TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)).await {
+            Err(e) => {
+                events
+                    .publish(
+                        &pod.object_ref(&()),
+                        EventType::Warning,
+                        "PeerIPServerConnectionFailed".into(),
+                        Some(format!(
+                            "Failed to connect to Netbird peer IP server on pod `{}`: {}",
+                            pod_name, e
+                        )),
+                        "Reconcile".into(),
+                    )
+                    .await?;
+                continue;
+            }
+            Ok(stream) => stream,
+        };
+
+        info!(
+            "[peer-ip-server] Connected to Netbird peer IP server on pod `{}` at {}:{}",
+            pod_name, pod_ip, NETBIRD_PEER_IP_PORT
+        );
+        // Read a single line from the stream to get the Netbird peer IP.
+        let mut reader = BufReader::new(&mut stream);
+        let mut response_line = String::new();
+        reader.read_line(&mut response_line).await?;
+
+        // Trim the response line and check if it's empty.
+        let response_line = response_line.trim().to_string();
+        if response_line.is_empty() {
+            events
+                .publish(
+                    &pod.object_ref(&()),
+                    EventType::Warning,
+                    "PeerIPServerEmptyResponse".into(),
+                    Some(format!(
+                        "Received empty response from Netbird peer IP server on pod `{}`",
+                        pod_name
+                    )),
+                    "Reconcile".into(),
+                )
+                .await?;
+            continue;
+        }
+
+        eprintln!("[peer-ip-server] peer IP server on pod `{pod_name}` is `{response_line}`");
+
+        peer_ips.push(response_line);
+    }
+
+    eprintln!("[peer-ip-server] Found {} Netbird peer IPs", peer_ips.len());
+    Ok(peer_ips)
 }

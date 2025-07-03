@@ -26,6 +26,13 @@ spec:
                 description: Configuration for creating Netbird tunnels.
                 nullable: true
                 properties:
+                  announceType:
+                    description: How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to [`NetbirdAnnounceType::IP`].
+                    enum:
+                    - IP
+                    - DNS
+                    nullable: true
+                    type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
@@ -102,6 +109,13 @@ spec:
                 description: Configuration for creating Netbird tunnels.
                 nullable: true
                 properties:
+                  announceType:
+                    description: How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to [`NetbirdAnnounceType::IP`].
+                    enum:
+                    - IP
+                    - DNS
+                    nullable: true
+                    type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true

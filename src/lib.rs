@@ -17,6 +17,9 @@ pub enum Error {
     #[error("Finalizer Error: {0}")]
     FinalizerError(#[from] Box<kube::runtime::finalizer::Error<Error>>),
 
+    #[error("IO Error: {0}")]
+    IoError(#[from] std::io::Error),
+
     #[error("An unexpected error occurred: {0}")]
     UnexpectedError(String),
 }

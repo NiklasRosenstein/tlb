@@ -54,6 +54,21 @@ pub struct NetbirdConfig {
     pub netbird_interface: Option<String>,
     /// The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
     pub up_command: Option<String>,
+    /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
+    /// [`NetbirdAnnounceType::IP`].
+    pub announce_type: Option<NetbirdAnnounceType>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub enum NetbirdAnnounceType {
+    /// Expose the tunnel using the IP address(es) of the Netbird peers.
+    IP,
+    /// Expose the tunnel using the common hostname of the Netbird peers (requires that the `tlb.io/dns` annotation
+    /// is set on the exposed service). Note that when using this in a `CNAME` entry, the hostname must be resolvable
+    /// by your client's DNS server. This is because `CNAME` records are not resolved by the client, but by the DNS
+    /// server. Hence, this option cannot usually be used with a public DNS server like Google DNS, Cloudflare DNS, etc.
+    #[allow(clippy::upper_case_acronyms)]
+    DNS,
 }
 
 ///
