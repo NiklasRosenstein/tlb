@@ -268,7 +268,7 @@ pub async fn reconcile_netbird_service(
                     affinity: Some(affinity),
                     containers: vec![Container {
                         name: "netbird".into(),
-                        image: Some(DEFAULT_NETBIRD_IMAGE.into()),
+                        image: Some(netbird.image.unwrap_or(DEFAULT_NETBIRD_IMAGE.into())),
                         command: Some(vec!["/bin/sh".into(), "-c".into(), launch_script]),
                         env: Some(env),
                         security_context: Some(SecurityContext {
