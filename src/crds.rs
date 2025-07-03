@@ -44,7 +44,9 @@ pub struct NetbirdConfig {
     /// name specified in the annotation is suffixed with this domain, it will be stripped as
     /// Netbird will automatically append it.
     pub netbird_dns_domain: Option<String>,
-    /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
+    /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
+    /// must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
+    /// controller.
     pub image: Option<String>,
     /// The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
     pub cluster_interface: Option<String>,

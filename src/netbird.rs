@@ -4,8 +4,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
         core::v1::{
-            Affinity, Capabilities, Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
-            SecurityContext, Service, ServicePort, ServiceStatus,
+            Affinity, Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec,
+            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference},
@@ -24,6 +24,9 @@ const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
 const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up";
+
+/// We launch a small TCP server on port `9999` to expose the Netbird peer IP.
+const NETBIRD_PEER_IP_PORT: u16 = 9999;
 
 ///
 /// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
@@ -64,6 +67,22 @@ fn get_netbird_launch_script(
             "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
         ));
     });
+
+    // Launch a process in the background that waits for the Netbird interface to come up and
+    // serve it.
+    launch_script.push(format!(
+        "( \
+            while ! ip addr show {netbird_iface} &>/dev/null; do \
+                echo \"[peer-ip-server] Waiting for {netbird_iface} to come up...\"; \
+                sleep 1; \
+            done; \
+            peer_ip=$(ip addr show {netbird_iface} | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1); \
+            echo \"[peer-ip-server] {netbird_iface} is up with ip $peer_ip, serving on port {NETBIRD_PEER_IP_PORT}...\"; \
+            while true; do \
+                echo -n \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \
+            done \
+        ) &"
+    ));
 
     launch_script.push(up_command);
     launch_script.join("\n")
@@ -292,6 +311,12 @@ pub async fn reconcile_netbird_service(
                             }),
                             ..Default::default()
                         }),
+                        ports: Some(vec![ContainerPort {
+                            name: Some("peer-ip".into()),
+                            protocol: Some("TCP".into()),
+                            container_port: NETBIRD_PEER_IP_PORT.into(),
+                            ..Default::default()
+                        }]),
                         readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
                             exec: Some(k8s_openapi::api::core::v1::ExecAction {
                                 command: Some(
