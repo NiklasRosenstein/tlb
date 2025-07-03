@@ -23,15 +23,19 @@ use crate::{Error, Result, ServiceAnnotations, crds::NetbirdConfig, simpleevent:
 const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
-const DEFAULT_NETBIRD_ENTRYPOINT: &str = "/usr/local/bin/netbird up";
+const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up";
 
 ///
 /// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
 /// and launches the Netbird service.
 ///
-fn get_netbird_launch_script(service_ip: &String, ports: &[ServicePort]) -> String {
-    let cluster_iface = DEFAULT_CLUSTER_INTERFACE;
-    let netbird_iface = DEFAULT_NETBIRD_INTERFACE;
+fn get_netbird_launch_script(
+    service_ip: String,
+    cluster_iface: String,
+    netbird_iface: String,
+    up_command: String,
+    ports: &[ServicePort],
+) -> String {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
     ports.iter().for_each(|port| {
@@ -61,7 +65,7 @@ fn get_netbird_launch_script(service_ip: &String, ports: &[ServicePort]) -> Stri
         ));
     });
 
-    launch_script.push(DEFAULT_NETBIRD_ENTRYPOINT.to_string());
+    launch_script.push(up_command);
     launch_script.join("\n")
 }
 
@@ -128,7 +132,17 @@ pub async fn reconcile_netbird_service(
     ]);
 
     // Construct commands for setting up iptables in the Netbird pod.
-    let launch_script = get_netbird_launch_script(&cluster_ip, &ports);
+    let launch_script = get_netbird_launch_script(
+        cluster_ip,
+        netbird
+            .cluster_interface
+            .unwrap_or(DEFAULT_CLUSTER_INTERFACE.to_string()),
+        netbird
+            .netbird_interface
+            .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string()),
+        netbird.up_command.unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
+        &ports,
+    );
 
     let mut env = vec![
         EnvVar {

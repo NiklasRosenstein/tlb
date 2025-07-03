@@ -46,6 +46,12 @@ pub struct NetbirdConfig {
     pub setup_key_ref: SeretKeyRef,
     /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
     pub image: Option<String>,
+    /// The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+    pub cluster_interface: Option<String>,
+    /// The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
+    pub netbird_interface: Option<String>,
+    /// The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+    pub up_command: Option<String>,
 }
 
 ///
