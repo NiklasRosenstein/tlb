@@ -38,12 +38,12 @@ pub struct TunnelClassInnerSpec {
 #[serde(rename_all = "camelCase")]
 pub struct NetbirdConfig {
     pub management_url: String,
+    pub setup_key_ref: SeretKeyRef,
     /// The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is
     /// used so we can know the full domain name when using the `tlb.io/dns` annotation. If the
     /// name specified in the annotation is suffixed with this domain, it will be stripped as
     /// Netbird will automatically append it.
     pub netbird_dns_domain: Option<String>,
-    pub setup_key_ref: SeretKeyRef,
     /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
     pub image: Option<String>,
     /// The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
