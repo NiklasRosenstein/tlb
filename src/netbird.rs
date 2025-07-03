@@ -468,8 +468,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
             "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{}` at {}:{}",
             pod_name, pod_ip, NETBIRD_PEER_IP_PORT
         );
-        let mut stream = match TcpStream::connect(format!("localhost:{NETBIRD_PEER_IP_PORT}",)).await {
-            // let mut stream = match TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)).await {
+        let mut stream = match TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)).await {
             Err(e) => {
                 events
                     .publish(

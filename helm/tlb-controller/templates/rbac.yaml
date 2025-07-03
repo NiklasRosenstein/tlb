@@ -27,6 +27,12 @@ rules:
       - list
   - apiGroups: [""]
     resources:
+      - pods
+    verbs:
+      - get
+      - list
+  - apiGroups: [""]
+    resources:
       - services
     verbs:
       - get
