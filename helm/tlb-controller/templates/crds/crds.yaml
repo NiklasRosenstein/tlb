@@ -26,6 +26,10 @@ spec:
                 description: Configuration for creating Netbird tunnels.
                 nullable: true
                 properties:
+                  clusterInterface:
+                    description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+                    nullable: true
+                    type: string
                   image:
                     description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
                     nullable: true
@@ -34,6 +38,10 @@ spec:
                     type: string
                   netbirdDnsDomain:
                     description: The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is used so we can know the full domain name when using the `tlb.io/dns` annotation. If the name specified in the annotation is suffixed with this domain, it will be stripped as Netbird will automatically append it.
+                    nullable: true
+                    type: string
+                  netbirdInterface:
+                    description: The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
                     nullable: true
                     type: string
                   setupKeyRef:
@@ -50,6 +58,10 @@ spec:
                     - key
                     - name
                     type: object
+                  upCommand:
+                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    nullable: true
+                    type: string
                 required:
                 - managementUrl
                 - setupKeyRef
@@ -90,6 +102,10 @@ spec:
                 description: Configuration for creating Netbird tunnels.
                 nullable: true
                 properties:
+                  clusterInterface:
+                    description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+                    nullable: true
+                    type: string
                   image:
                     description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
                     nullable: true
@@ -98,6 +114,10 @@ spec:
                     type: string
                   netbirdDnsDomain:
                     description: The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is used so we can know the full domain name when using the `tlb.io/dns` annotation. If the name specified in the annotation is suffixed with this domain, it will be stripped as Netbird will automatically append it.
+                    nullable: true
+                    type: string
+                  netbirdInterface:
+                    description: The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
                     nullable: true
                     type: string
                   setupKeyRef:
@@ -114,6 +134,10 @@ spec:
                     - key
                     - name
                     type: object
+                  upCommand:
+                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    nullable: true
+                    type: string
                 required:
                 - managementUrl
                 - setupKeyRef
