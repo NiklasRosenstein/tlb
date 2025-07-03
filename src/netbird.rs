@@ -278,6 +278,19 @@ pub async fn reconcile_netbird_service(
                             }),
                             ..Default::default()
                         }),
+                        readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
+                            exec: Some(k8s_openapi::api::core::v1::ExecAction {
+                                command: Some(
+                                    vec!["ip", "addr", "show", DEFAULT_NETBIRD_INTERFACE]
+                                        .into_iter()
+                                        .map(|s| s.into())
+                                        .collect(),
+                                ),
+                            }),
+                            initial_delay_seconds: Some(5),
+                            period_seconds: Some(30),
+                            ..Default::default()
+                        }),
                         ..Default::default()
                     }],
                     ..Default::default()
