@@ -1,28 +1,97 @@
 [tools]
 rust = {version = "1.87", components = "rustfmt,clippy"}
 
+# Type checking
+
+[tasks.crate-check]
+depends = ["crate-lint"]
+
+[tasks.scripts-check]
+run = "deno check scripts"
+tools.deno = "2"
+
+[tasks.check]
+depends = ["crate-check", "scripts-check"]
+
+# Formatting
+
+[tasks.crate-fmt]
+run = "cargo fmt --all"
+
+[tasks.aux-fmt]
+run = "deno fmt README.md .github/ --line-width 120"
+tools.deno = "2"
+
+[tasks.scripts-fmt]
+run = "deno fmt scripts --line-width 120"
+tools.deno = "2"
+
 [tasks.fmt]
-run = "cargo fmt --all && deno fmt README.md .github/ --line-width 120"
+depends = ["crate-fmt", "aux-fmt", "scripts-fmt"]
+
+# Formatting check
+
+[tasks.crate-fmt-check]
+run = "cargo fmt --all  --check"
+
+[tasks.aux-fmt-check]
+run = "deno fmt README.md .github/ --line-width 120  --check"
+tools.deno = "2"
+
+[tasks.scripts-fmt-check]
+run = "deno fmt scripts --line-width 120 --check"
 tools.deno = "2"
 
 [tasks.fmt-check]
-run = "cargo fmt --all -- --check && deno fmt README.md .github/ --line-width 120 --check"
+depends = ["crate-fmt-check", "aux-fmt-check", "scripts-fmt-check"]
+
+# Linting
+
+[tasks.crate-lint]
+run = "cargo clippy --all-features -- -D warnings"
+
+[tasks.scripts-lint]
+run = "deno lint scripts"
 tools.deno = "2"
 
 [tasks.lint]
-run = "cargo clippy --all-features -- -D warnings"
-wait_for = ["fmt-check", "fmt"]
+depends = ["crate-lint", "scripts-lint"]
 
-[tasks.fix]
+# Fixing
+
+[tasks.crate-fix]
 run = "cargo clippy --all-features --fix --allow-dirty --allow-staged"
 
-[tasks.build]
+[tasks.scripts-fix]
+run = "deno lint --fix scripts"
+tools.deno = "2"
+
+[tasks.fix]
+depends = ["crate-fix", "scripts-fix"]
+
+# Build
+
+[tasks.crate-build]
 run = "cargo build --all-features"
+
+[tasks.build]
+depends = ["crate-build"]
 wait_for = ["lint"]
 
-[tasks.test]
+# Tests
+
+[tasks.crate-test]
 run = "cargo test --all-features"
+
+# [tasks.scripts-test]
+# run = "deno test scripts --allow-read --allow-env --allow-run --allow-net --allow-write"
+# tools.deno = "2"
+
+[tasks.test]
+depends = ["crate-test"] #, "scripts-test"]
 wait_for = ["build"]
+
+# CRDs
 
 [tasks.update-crds]
 depends = ["build"]
