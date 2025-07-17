@@ -325,7 +325,8 @@ pub async fn reconcile_netbird_service(
         }
     };
 
-    let deployment_name = format!("tunnel-{}", svc_name);
+    let deployment_prefix = netbird.deployment_prefix.unwrap_or_else(|| "tunnel-".to_string());
+    let deployment_name = format!("{deployment_prefix}{svc_name}");
     let deployment = Deployment {
         metadata: ObjectMeta {
             name: Some(deployment_name.clone()),

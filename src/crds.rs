@@ -62,6 +62,8 @@ pub struct NetbirdConfig {
     pub announce_type: Option<NetbirdAnnounceType>,
     /// How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
     pub forwarding_mode: Option<NetbirdForwardingMode>,
+    /// Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
+    pub deployment_prefix: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

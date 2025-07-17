@@ -40,6 +40,10 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
+                  deploymentPrefix:
+                    description: Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
+                    nullable: true
+                    type: string
                   forwardingMode:
                     description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
                     enum:
@@ -131,6 +135,10 @@ spec:
                     type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+                    nullable: true
+                    type: string
+                  deploymentPrefix:
+                    description: Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
                     nullable: true
                     type: string
                   forwardingMode:
