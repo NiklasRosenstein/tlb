@@ -186,7 +186,7 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
     }
 }
 
-pub async fn run() {
+pub async fn run(reconcile_interval: std::time::Duration) {
     let client = kube::Client::try_default()
         .await
         .expect("failed to create kube::Client");
@@ -197,7 +197,6 @@ pub async fn run() {
 
     // Periodically reconcile all tunnel classes.
     // TODO: Instead, watch services and trigger a reconciliation when a service is created or updated?
-    let reconcile_interval = std::time::Duration::from_secs(10);
     let mut interval = tokio::time::interval(reconcile_interval);
     loop {
         info!("Starting reconciliation cycle");
