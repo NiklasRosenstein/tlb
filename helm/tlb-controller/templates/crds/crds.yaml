@@ -49,6 +49,7 @@ spec:
                     enum:
                     - Iptables
                     - Socat
+                    - SocatWithDns
                     nullable: true
                     type: string
                   image:
@@ -146,6 +147,7 @@ spec:
                     enum:
                     - Iptables
                     - Socat
+                    - SocatWithDns
                     nullable: true
                     type: string
                   image:

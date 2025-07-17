@@ -64,7 +64,7 @@ fn get_netbird_launch_script(
             // Install iptables if it's not already installed.
             launch_script.push("if ! command iptables >/dev/null; then apk add --no-cache iptables; fi".to_owned());
         }
-        NetbirdForwardingMode::Socat => {
+        NetbirdForwardingMode::Socat | NetbirdForwardingMode::SocatWithDns => {
             // Install socat if it's not already installed.
             launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
         }
@@ -106,6 +106,10 @@ fn get_netbird_launch_script(
                 ));
             }
             NetbirdForwardingMode::Socat => launch_script.push(format!(
+                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
+                    {protocol_upper}:{service_ip}:{port} &"
+            )),
+            NetbirdForwardingMode::SocatWithDns => launch_script.push(format!(
                 "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
                     {protocol_upper}:{service_name}.{service_namespace}:{port} &"
             )),

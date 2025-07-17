@@ -92,6 +92,15 @@ pub enum NetbirdForwardingMode {
     ///
     /// This mode is more stable and generally usable than [`NetbirdForwardingMode::Iptables`] at this time.
     Socat,
+
+    /// [Experimental] Same as [`NetbirdForwardingMode::Socat`], only that instead of hard-coding the Kubernetes
+    /// service IP as the destination, it uses the DNS name of the service. This is not the default because there
+    /// are some issues with DNS resolution in the Netbird image where it takes precedence.
+    ///
+    /// When DNS resolution works as expected in the Netbird Pod, this mode is preferred as it allows for the
+    /// Service IP to change without having to update the Deployment and recreate the Pod (causing a churn of the
+    /// LoadBalancer IP).
+    SocatWithDns,
 }
 
 ///
