@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use k8s_openapi::{
     api::{
@@ -25,7 +25,7 @@ use tokio::{
 
 use crate::{
     Error, Result, ServiceAnnotations,
-    crds::{NetbirdAnnounceType, NetbirdConfig},
+    crds::{NetbirdAnnounceType, NetbirdConfig, NetbirdForwardingMode},
     simpleevent::SimpleEventRecorder,
 };
 
@@ -39,15 +39,19 @@ const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up";
 /// the case, especially when registering a CNAME entry for the Netbird tunnel in a public DNS server.
 const DEFAULT_ANNOUNCE_TYPE: NetbirdAnnounceType = NetbirdAnnounceType::IP;
 
-/// We launch a small TCP server on port `9999` to expose the Netbird peer IP.
-const NETBIRD_PEER_IP_PORT: u16 = 9999;
+/// We launch a small TCP server on port `15411` in the tunnel Pod to expose the Netbird peer IP.
+pub const NETBIRD_PEER_IP_PORT: u16 = 15411;
 
 ///
 /// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
 /// and launches the Netbird service.
 ///
+#[allow(clippy::too_many_arguments)]
 fn get_netbird_launch_script(
+    forwarding_mode: NetbirdForwardingMode,
     service_ip: String,
+    service_name: String,
+    service_namespace: String,
     cluster_iface: String,
     netbird_iface: String,
     up_command: String,
@@ -55,35 +59,62 @@ fn get_netbird_launch_script(
 ) -> String {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
+    match forwarding_mode {
+        NetbirdForwardingMode::Iptables => {
+            // Install iptables if it's not already installed.
+            launch_script.push("if ! command iptables >/dev/null; then apk add --no-cache iptables; fi".to_owned());
+        }
+        NetbirdForwardingMode::Socat => {
+            // Install socat if it's not already installed.
+            launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
+        }
+    }
+
     ports.iter().for_each(|port| {
         let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+        let protocol_upper = protocol.to_uppercase();
         let port = port.port;
 
-        // Accept new connections to the cluster IP and port.
-        launch_script.push(format!(
-            "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} -p {protocol} -d {service_ip} --dport {port} -m conntrack --ctstate NEW -j ACCEPT"
-        ));
+        match forwarding_mode {
+            NetbirdForwardingMode::Iptables => {
+                // Accept new connections to the cluster IP and port.
+                launch_script.push(format!(
+                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                        -p {protocol} -d {service_ip} --dport {port} -m conntrack \
+                        --ctstate NEW -j ACCEPT"
+                ));
 
-        // Accept established connections to the cluster IP and port.
-        launch_script.push(format!(
-            "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-        ));
-        launch_script.push(format!(
-            "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-        ));
+                // Accept established connections to the cluster IP and port.
+                launch_script.push(format!(
+                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                ));
+                launch_script.push(format!(
+                    "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
+                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                ));
 
-        // NAT packets destined for the cluster IP and port.
-        launch_script.push(format!(
-            "iptables -t nat -I PREROUTING 1 -i {netbird_iface} -p {protocol} --dport {port} -j DNAT --to-destination {service_ip}:{port}"
-        ));
+                // NAT packets destined for the cluster IP and port.
+                launch_script.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
+                        -p {protocol} --dport {port} -j DNAT \
+                        --to-destination {service_ip}:{port}"
+                ));
 
-        launch_script.push(format!(
-            "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-        ));
+                launch_script.push(format!(
+                    "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
+                ));
+            }
+            NetbirdForwardingMode::Socat => launch_script.push(format!(
+                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
+                    {protocol_upper}:{service_name}.{service_namespace}:{port} &"
+            )),
+        }
+
+        launch_script.push("apk add socat".to_owned());
     });
 
-    // Launch a process in the background that waits for the Netbird interface to come up and
-    // serve it.
+    // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
     launch_script.push(format!(
         "( \
             while ! ip addr show {netbird_iface} &>/dev/null; do \
@@ -167,7 +198,10 @@ pub async fn reconcile_netbird_service(
 
     // Construct commands for setting up iptables in the Netbird pod.
     let launch_script = get_netbird_launch_script(
+        netbird.forwarding_mode.unwrap_or(NetbirdForwardingMode::Socat),
         cluster_ip,
+        svc_name.clone(),
+        svc_namespace.clone(),
         netbird
             .cluster_interface
             .unwrap_or(DEFAULT_CLUSTER_INTERFACE.to_string()),
@@ -468,15 +502,21 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
             "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{}` at {}:{}",
             pod_name, pod_ip, NETBIRD_PEER_IP_PORT
         );
-        let mut stream = match TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)).await {
-            Err(e) => {
+        let mut stream = match tokio::time::timeout(
+            Duration::from_secs(5),
+            TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            e => {
                 events
                     .publish(
                         &pod.object_ref(&()),
                         EventType::Warning,
                         "PeerIPServerConnectionFailed".into(),
                         Some(format!(
-                            "Failed to connect to Netbird peer IP server on pod `{}`: {}",
+                            "Failed to connect to Netbird peer IP server on pod `{}`: {:?}",
                             pod_name, e
                         )),
                         "Reconcile".into(),
@@ -484,7 +524,6 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
                     .await?;
                 continue;
             }
-            Ok(stream) => stream,
         };
 
         info!(

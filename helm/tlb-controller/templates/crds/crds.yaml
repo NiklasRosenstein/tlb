@@ -23,7 +23,10 @@ spec:
             description: Define a namespaced tunnel class.
             properties:
               netbird:
-                description: Configuration for creating Netbird tunnels.
+                description: |-
+                  Configuration for creating Netbird tunnels.
+
+                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the pod and can therefore not be used by the service that is exposed by the tunnel.
                 nullable: true
                 properties:
                   announceType:
@@ -35,6 +38,13 @@ spec:
                     type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+                    nullable: true
+                    type: string
+                  forwardingMode:
+                    description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
+                    enum:
+                    - Iptables
+                    - Socat
                     nullable: true
                     type: string
                   image:
@@ -106,7 +116,10 @@ spec:
             description: Define a cluster-scoped tunnel class.
             properties:
               netbird:
-                description: Configuration for creating Netbird tunnels.
+                description: |-
+                  Configuration for creating Netbird tunnels.
+
+                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the pod and can therefore not be used by the service that is exposed by the tunnel.
                 nullable: true
                 properties:
                   announceType:
@@ -118,6 +131,13 @@ spec:
                     type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
+                    nullable: true
+                    type: string
+                  forwardingMode:
+                    description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
+                    enum:
+                    - Iptables
+                    - Socat
                     nullable: true
                     type: string
                   image:

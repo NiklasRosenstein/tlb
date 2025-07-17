@@ -34,6 +34,9 @@ pub struct TunnelClassInnerSpec {
 ///
 /// Configuration for creating Netbird tunnels.
 ///
+/// Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the
+/// pod and can therefore not be used by the service that is exposed by the tunnel.
+///
 #[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NetbirdConfig {
@@ -57,6 +60,8 @@ pub struct NetbirdConfig {
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
     /// [`NetbirdAnnounceType::IP`].
     pub announce_type: Option<NetbirdAnnounceType>,
+    /// How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
+    pub forwarding_mode: Option<NetbirdForwardingMode>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
@@ -69,6 +74,22 @@ pub enum NetbirdAnnounceType {
     /// server. Hence, this option cannot usually be used with a public DNS server like Google DNS, Cloudflare DNS, etc.
     #[allow(clippy::upper_case_acronyms)]
     DNS,
+}
+
+/// Specifies how forwarding is implemented in the Netbird pod(s) that are created for the service.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+pub enum NetbirdForwardingMode {
+    /// [Experimental] Setup forwarding with `iptables` rules.
+    ///
+    /// This mode is known to have issues with ports other than 80/443 (don't ask me why).
+    Iptables,
+
+    /// [Experimental] Install and run  `socat` to forward traffic. When this mode is used as the `socat` program
+    /// is not available in the Netbird image, it will be installed using the image's package manager. Currently,
+    /// only `apk` is supported.
+    ///
+    /// This mode is more stable and generally usable than [`NetbirdForwardingMode::Iptables`] at this time.
+    Socat,
 }
 
 ///
