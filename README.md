@@ -49,9 +49,9 @@ spec:
 
 ## Supported tunneling services
 
-- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
-- [NetBird](https://netbird.io/)
-- [Tailscale](https://tailscale.com/)
+- [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) (planned)
+- [NetBird](https://netbird.io/) (WIP)
+- [Tailscale](https://tailscale.com/) (planned)
 
 ## Service annotations
 
@@ -64,6 +64,15 @@ spec:
   `kubernetes.io/hostname`.
 - `tlb.io/node-selector`: A comma-separated list of node labels to select nodes for the tunnel. This is useful for
   targeting specific nodes in your cluster.
+
+## Known issues
+
+### NetBird
+
+* Pods created by the controller do not retain their identity. When they are re-scheduled, they will connect as new
+  peers to the cluster and be assigned fresh IPs. It takes a while for the new IPs to propagate from the Pod, to the
+  Service, to Ingresses and eventually, if you are using it, to be updated by external-dns and eventually make it
+  through your computer's DNS cache.
 
 ## Work in progress
 
