@@ -149,6 +149,7 @@ pub async fn reconcile_netbird_service(
     service: Service,
     options: ServiceAnnotations,
     netbird: NetbirdConfig,
+    tunnel_class_name: &str,
 ) -> Result<()> {
     let svc_name = service.metadata.name.as_ref().ok_or(Error::UnexpectedError(format!(
         "Service does not have a name: {:?}",
@@ -197,7 +198,14 @@ pub async fn reconcile_netbird_service(
     let match_labels = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), "netbird".to_string()),
         ("app.kubernetes.io/instance".to_string(), svc_name.to_string()),
-        ("controller.tlb.io/for-service".to_string(), svc_name.clone()),
+        (
+            "controller.tlb.io/for-service".to_string(),
+            svc_name.clone(),
+        ),
+        (
+            "tlb.io/tunnel-class".to_string(),
+            tunnel_class_name.to_string(),
+        ),
     ]);
 
     // Construct commands for setting up iptables in the Netbird pod.

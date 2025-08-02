@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use k8s_openapi::{
-    api::core::v1::{Namespace, Service},
+    api::{apps::v1::Deployment, core::v1::{Namespace, Service}},
     apimachinery::pkg::apis::meta::v1::OwnerReference,
 };
 use kube::{
@@ -123,6 +125,42 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                 .join(", ")
         );
 
+        // Clean up orphaned deployments.
+        let services_with_lb_class: HashSet<String> =
+            services.iter().map(|s| s.metadata.name.clone().unwrap()).collect();
+
+        for ns in &namespaces {
+            let deployment_api =
+                Api::<Deployment>::namespaced(ctx.context.client.clone(), ns.metadata.name.as_ref().unwrap());
+            let deployments = deployment_api
+                .list(
+                    &ListParams::default()
+                        .labels(&format!("tlb.io/tunnel-class={}", tunnel_class_name)),
+                )
+                .await?;
+
+            for deployment in deployments {
+                let deployment_name = deployment.metadata.name.as_ref().unwrap();
+                let service_name_label = deployment
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|l| l.get("controller.tlb.io/for-service"));
+
+                if let Some(service_name) = service_name_label {
+                    if !services_with_lb_class.contains(service_name) {
+                        info!(
+                            "Deleting orphaned deployment `{}` for service `{}`",
+                            deployment_name, service_name
+                        );
+                        deployment_api
+                            .delete(deployment_name, &Default::default())
+                            .await?;
+                    }
+                }
+            }
+        }
+
         // Process each individual service.
         for service in services {
             let svc_name = service.metadata.name.as_ref().unwrap();
@@ -177,6 +215,7 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                     service,
                     options,
                     netbird,
+                    tunnel_class_name,
                 )
                 .await?;
             }
