@@ -32,7 +32,7 @@ use crate::{
 const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
-const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up";
+pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=warn";
 
 /// We prefer to expose the Netbird tunnel using the IP address of the Netbird peer, as this will work in most cases.
 /// Using the DNS name instead will require that the DNS server can resolve the Netbird domain, which is not always

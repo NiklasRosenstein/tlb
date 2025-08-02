@@ -55,7 +55,8 @@ pub struct NetbirdConfig {
     pub cluster_interface: Option<String>,
     /// The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
     pub netbird_interface: Option<String>,
-    /// The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+    /// The command to run alias to `netbird up` in the container. Defaults to
+    /// [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
     pub up_command: Option<String>,
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
     /// [`NetbirdAnnounceType::IP`].
