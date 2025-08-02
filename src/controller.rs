@@ -14,9 +14,9 @@ use kube::{
 use log::info;
 use serde_json::json;
 use tlb::{
+    Error, Result,
     crds::{ClusterTunnelClass, TunnelClass, TunnelClassInnerSpec},
     simpleevent::SimpleEventRecorder,
-    Error, Result,
 };
 
 const FINALIZER_NAME: &str = "tlb.io/finalizer";
@@ -51,10 +51,7 @@ async fn get_deployments(ctx: &ReconcileContext) -> Result<Vec<Deployment>> {
     Ok(deployments.items)
 }
 
-async fn reconcile(
-    tunnel_class: &TunnelClassInnerSpec,
-    ctx: &ReconcileContext,
-) -> Result<Action> {
+async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) -> Result<Action> {
     // Validate the name and namespace fields in the metadata.
     if ctx.metadata.name.is_none() {
         return Err(Error::UnexpectedError(".metadata.name is not set".to_string()));
@@ -71,11 +68,7 @@ async fn reconcile(
     let api_resource = if ctx.namespaced {
         ApiResource::from_gvk(&GroupVersionKind::gvk("tlb.io", "v1alpha1", "TunnelClass"))
     } else {
-        ApiResource::from_gvk(&GroupVersionKind::gvk(
-            "tlb.io",
-            "v1alpha1",
-            "ClusterTunnelClass",
-        ))
+        ApiResource::from_gvk(&GroupVersionKind::gvk("tlb.io", "v1alpha1", "ClusterTunnelClass"))
     };
 
     let tunnel_class_api: Api<DynamicObject> = if ctx.namespaced {
@@ -126,7 +119,7 @@ async fn reconcile(
         .metadata
         .finalizers
         .as_ref()
-        .map_or(false, |f| f.contains(&FINALIZER_NAME.to_string()))
+        .is_some_and(|f| f.contains(&FINALIZER_NAME.to_string()))
     {
         tunnel_class_api
             .patch(
@@ -212,8 +205,7 @@ async fn reconcile(
     );
 
     // Clean up orphaned deployments.
-    let services_with_lb_class: HashSet<String> =
-        services.iter().map(|s| s.metadata.name.clone().unwrap()).collect();
+    let services_with_lb_class: HashSet<String> = services.iter().map(|s| s.metadata.name.clone().unwrap()).collect();
 
     for ns in &namespaces {
         let deployment_api =
@@ -327,9 +319,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
             .list(&ListParams::default())
             .await
         {
-            Ok(resources) => {
-                tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, true)))
-            }
+            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, true))),
             Err(e) => {
                 info!("Failed to list TunnelClasses: {}", e);
             }
@@ -340,8 +330,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
             .list(&ListParams::default())
             .await
         {
-            Ok(resources) => tunnel_classes
-                .extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, false))),
+            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, false))),
             Err(e) => {
                 info!("Failed to list ClusterTunnelClasses: {}", e);
             }
@@ -353,16 +342,14 @@ pub async fn run(reconcile_interval: std::time::Duration) {
                 metadata: tunnel_class.1.clone(),
                 namespaced: tunnel_class.2,
             };
-            reconcile(&tunnel_class.0, &ctx)
-                .await
-                .unwrap_or_else(|e| {
-                    info!(
-                        "Failed to reconcile TunnelClass {}: {}",
-                        tunnel_class.1.name.unwrap(),
-                        e
-                    );
-                    Action::requeue(reconcile_interval)
-                });
+            reconcile(&tunnel_class.0, &ctx).await.unwrap_or_else(|e| {
+                info!(
+                    "Failed to reconcile TunnelClass {}: {}",
+                    tunnel_class.1.name.unwrap(),
+                    e
+                );
+                Action::requeue(reconcile_interval)
+            });
         }
 
         interval.tick().await;
