@@ -69,7 +69,7 @@ spec:
 
 ### NetBird
 
-* Pods created by the controller do not retain their identity. When they are re-scheduled, they will connect as new
+- Pods created by the controller do not retain their identity. When they are re-scheduled, they will connect as new
   peers to the cluster and be assigned fresh IPs. It takes a while for the new IPs to propagate from the Pod, to the
   Service, to Ingresses and eventually, if you are using it, to be updated by external-dns and eventually make it
   through your computer's DNS cache.
