@@ -40,10 +40,6 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
-                  deploymentPrefix:
-                    description: Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
-                    nullable: true
-                    type: string
                   forwardingMode:
                     description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
                     enum:
@@ -66,6 +62,10 @@ spec:
                     description: The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
                     nullable: true
                     type: string
+                  resourcePrefix:
+                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+                    nullable: true
+                    type: string
                   setupKeyRef:
                     description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
                     properties:
@@ -80,8 +80,16 @@ spec:
                     - key
                     - name
                     type: object
+                  size:
+                    description: The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage classes have a minimum size, so you might need to adjust this value.
+                    nullable: true
+                    type: string
+                  storageClass:
+                    description: The storage class to use for the persistent volume claim. If this is not set, an emptyDir will be used.
+                    nullable: true
+                    type: string
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:
@@ -138,10 +146,6 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
-                  deploymentPrefix:
-                    description: Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
-                    nullable: true
-                    type: string
                   forwardingMode:
                     description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
                     enum:
@@ -164,6 +168,10 @@ spec:
                     description: The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
                     nullable: true
                     type: string
+                  resourcePrefix:
+                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+                    nullable: true
+                    type: string
                   setupKeyRef:
                     description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
                     properties:
@@ -178,8 +186,16 @@ spec:
                     - key
                     - name
                     type: object
+                  size:
+                    description: The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage classes have a minimum size, so you might need to adjust this value.
+                    nullable: true
+                    type: string
+                  storageClass:
+                    description: The storage class to use for the persistent volume claim. If this is not set, an emptyDir will be used.
+                    nullable: true
+                    type: string
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:
