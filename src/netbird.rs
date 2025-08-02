@@ -473,9 +473,7 @@ pub async fn reconcile_netbird_service(
 
                     // Recreate the statefulset immediately.
                     info!("Re-creating statefulset for service `{svc_name}` after deletion.");
-                    statefulset_api
-                        .create(&PostParams::default(), &statefulset)
-                        .await?;
+                    statefulset_api.create(&PostParams::default(), &statefulset).await?;
                     info!("Re-created statefulset for service `{svc_name}`");
                 }
                 Err(e) => {
