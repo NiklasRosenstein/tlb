@@ -338,6 +338,7 @@ pub async fn reconcile_netbird_service(
             name: Some(deployment_name.clone()),
             namespace: Some(deployment_namespace.clone()),
             owner_references: Some(owner_references),
+            labels: Some(match_labels.clone()),
             ..Default::default()
         },
         spec: Some(DeploymentSpec {
