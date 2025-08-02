@@ -366,7 +366,6 @@ pub async fn reconcile_netbird_service(
             ..Default::default()
         }),
         spec: Some(pod_spec),
-        ..Default::default()
     };
 
     let resource_name = format!(
@@ -438,15 +437,43 @@ pub async fn reconcile_netbird_service(
     let statefulset_api = Api::<StatefulSet>::namespaced(client.clone(), &resource_namespace);
     // Patch or create the statefulset.
     match statefulset_api.get_opt(&resource_name).await? {
-        Some(_existing) => {
-            statefulset_api
-                .patch(
-                    &resource_name,
-                    &PatchParams::apply("tlb-controller").force(),
-                    &Patch::Apply(&statefulset),
-                )
-                .await?;
-            info!("Patched statefulset for service `{svc_name}`");
+        Some(existing) => {
+            let existing_vc_templates = existing.spec.as_ref().and_then(|s| s.volume_claim_templates.clone());
+            let new_vc_templates = statefulset.spec.as_ref().and_then(|s| s.volume_claim_templates.clone());
+
+            if existing_vc_templates != new_vc_templates {
+                // volumeClaimTemplates have changed, which is not allowed.
+                // We need to delete and recreate the StatefulSet.
+                info!(
+                    "volumeClaimTemplates for StatefulSet '{}' have changed. Deleting.",
+                    resource_name
+                );
+                events.publish(
+                    &service.object_ref(&()),
+                    EventType::Warning,
+                    "StatefulSetRecreation".into(),
+                    Some(format!("volumeClaimTemplates for StatefulSet '{resource_name}' have changed. Deleting and recreating.")),
+                    "Reconcile".into(),
+                ).await?;
+                statefulset_api.delete(&resource_name, &Default::default()).await?;
+
+                // Recreate the statefulset immediately.
+                info!(
+                    "Re-creating statefulset for service `{svc_name}` after deletion due to volumeClaimTemplate changes."
+                );
+                statefulset_api.create(&PostParams::default(), &statefulset).await?;
+                info!("Re-created statefulset for service `{svc_name}`");
+            } else {
+                // No change in volumeClaimTemplates, so we can patch.
+                statefulset_api
+                    .patch(
+                        &resource_name,
+                        &PatchParams::apply("tlb-controller").force(),
+                        &Patch::Apply(&statefulset),
+                    )
+                    .await?;
+                info!("Patched statefulset for service `{svc_name}`");
+            }
         }
         None => {
             statefulset_api.create(&PostParams::default(), &statefulset).await?;
