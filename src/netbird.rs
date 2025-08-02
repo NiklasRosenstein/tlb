@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, time::Duration};
 
 use k8s_openapi::{
     api::{
-        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
+        apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            Affinity, Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, LoadBalancerIngress, Pod, PodSpec,
+            Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, LoadBalancerIngress, Pod, PodSpec,
             PodTemplateSpec, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus,
         },
     },
@@ -189,7 +189,7 @@ pub async fn reconcile_netbird_service(
     // be in the same namespace.
     let deployment_namespace = netbird.setup_key_ref.namespace.unwrap_or(svc_namespace.clone());
 
-    let deployment_api = Api::<Deployment>::namespaced(client.clone(), &deployment_namespace);
+    let _deployment_api = Api::<Deployment>::namespaced(client.clone(), &deployment_namespace);
     let pod_api = Api::<Pod>::namespaced(client.clone(), &deployment_namespace);
     let svc_api = Api::<Service>::namespaced(client.clone(), svc_namespace);
 
@@ -278,56 +278,9 @@ pub async fn reconcile_netbird_service(
     }
 
     // Construct the node selector from the service annotations.
-    let node_selector: BTreeMap<String, String> = if let Some(node_selector_str) = &options.node_selector {
-        node_selector_str
-            .split(',')
-            .map(|s| s.trim())
-            .filter_map(|s| {
-                let mut parts = s.splitn(2, '=');
-                if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                    Some((key.to_string(), value.to_string()))
-                } else {
-                    None
-                }
-            })
-            .collect()
-    } else {
-        BTreeMap::new()
-    };
-
-    // Construct anti-affinity rules based on topology key.
-    let affinity = Affinity {
-        pod_anti_affinity: Some(k8s_openapi::api::core::v1::PodAntiAffinity {
-            required_during_scheduling_ignored_during_execution: Some(vec![
-                k8s_openapi::api::core::v1::PodAffinityTerm {
-                    label_selector: Some(LabelSelector {
-                        match_labels: Some(match_labels.clone()),
-                        ..Default::default()
-                    }),
-                    topology_key: options
-                        .topology_key
-                        .clone()
-                        .unwrap_or_else(|| "kubernetes.io/hostname".to_string()),
-                    ..Default::default()
-                },
-            ]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    // If there's only one replica, we need a different deployment strategy.
-    let deployment_strategy = if options.replicas == 1 {
-        DeploymentStrategy {
-            type_: Some("Recreate".into()),
-            rolling_update: None,
-        }
-    } else {
-        DeploymentStrategy {
-            type_: Some("RollingUpdate".into()),
-            rolling_update: None,
-        }
-    };
+    let node_selector = crate::deployment::get_node_selector(&options);
+    let affinity = crate::deployment::get_affinity(&options, match_labels.clone());
+    let deployment_strategy = crate::deployment::get_deployment_strategy(&options);
 
     let deployment_prefix = netbird.deployment_prefix.unwrap_or_else(|| "tunnel-".to_string());
     let deployment_name = format!("{deployment_prefix}{svc_name}");
@@ -394,27 +347,7 @@ pub async fn reconcile_netbird_service(
         ..Default::default()
     };
 
-    // Patch or create the deployment.
-    match deployment_api.get_opt(&deployment_name).await? {
-        Some(_existing) => {
-            // Patch the deployment if it exists (server-side apply)
-            use kube::api::{Patch, PatchParams};
-            deployment_api
-                .patch(
-                    &deployment_name,
-                    &PatchParams::apply("tlb-controller").force(),
-                    &Patch::Apply(&deployment),
-                )
-                .await?;
-            info!("Patched deployment for service `{}`", svc_name);
-        }
-        None => {
-            // Create the deployment if it does not exist
-            use kube::api::PostParams;
-            deployment_api.create(&PostParams::default(), &deployment).await?;
-            info!("Created deployment for service `{}`", svc_name);
-        }
-    }
+    crate::deployment::create_or_patch_deployment(client, &deployment_namespace, &deployment).await?;
 
     // Find all pods that match the deployment's selector.
     let pods = pod_api

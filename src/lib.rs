@@ -3,8 +3,10 @@ use std::collections::BTreeMap;
 use kube::runtime::controller::Action;
 
 pub mod crds;
+pub mod deployment;
 pub mod netbird;
 pub mod simpleevent;
+pub mod tailscale;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

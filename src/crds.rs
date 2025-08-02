@@ -29,6 +29,20 @@ pub struct TunnelClassSpec {
 #[serde(rename_all = "camelCase")]
 pub struct TunnelClassInnerSpec {
     pub netbird: Option<NetbirdConfig>,
+    pub tailscale: Option<TailscaleConfig>,
+}
+
+///
+/// Configuration for creating Tailscale tunnels.
+///
+#[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TailscaleConfig {
+    pub auth_key_secret_ref: SeretKeyRef,
+    /// The tailscale image to use for the tunnel pods. Defaults to `ghcr.io/tailscale/tailscale:latest`.
+    pub image: Option<String>,
+    /// Prefix for the Deployment that is created for the Tailscale tunnel. Defaults to `tunnel-`.
+    pub deployment_prefix: Option<String>,
 }
 
 ///

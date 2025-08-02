@@ -169,6 +169,12 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                 },
             ];
 
+            if self.netbird.is_some() && self.tailscale.is_some() {
+                return Err(Error::UnexpectedError(
+                    "TunnelClass cannot have both netbird and tailscale configured".to_string(),
+                ));
+            }
+
             if let Some(netbird) = self.netbird.clone() {
                 tlb::netbird::reconcile_netbird_service(
                     &ctx.context.client,
@@ -177,6 +183,16 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                     service,
                     options,
                     netbird,
+                )
+                .await?;
+            } else if let Some(tailscale) = self.tailscale.clone() {
+                tlb::tailscale::reconcile_tailscale_service(
+                    &ctx.context.client,
+                    &ctx.context.events,
+                    owner_references,
+                    service,
+                    options,
+                    tailscale,
                 )
                 .await?;
             }
