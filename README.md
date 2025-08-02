@@ -86,7 +86,8 @@ spec:
   - [x] Support for `tlb.io/replicas`
   - [x] Support for `tlb.io/topology-key`
   - [x] Support for `tlb.io/node-selector`
-  - [ ] Cleanup on `Service` change or deletion
+  - [x] Cleanup on `Service` change or deletion
+  - [x] Cleanup on `TunnelClass` deletion
   - [ ] Update `Deployment` on `Service` only when they actually changed
 - [ ] Cloudflare support
 - [ ] Tailscale support
