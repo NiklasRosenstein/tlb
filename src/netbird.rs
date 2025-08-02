@@ -366,7 +366,6 @@ pub async fn reconcile_netbird_service(
             ..Default::default()
         }),
         spec: Some(pod_spec),
-        ..Default::default()
     };
 
     let resource_name = format!(
@@ -445,7 +444,10 @@ pub async fn reconcile_netbird_service(
             if existing_vc_templates != new_vc_templates {
                 // volumeClaimTemplates have changed, which is not allowed.
                 // We need to delete and recreate the StatefulSet.
-                info!("volumeClaimTemplates for StatefulSet '{}' have changed. Deleting.", resource_name);
+                info!(
+                    "volumeClaimTemplates for StatefulSet '{}' have changed. Deleting.",
+                    resource_name
+                );
                 events.publish(
                     &service.object_ref(&()),
                     EventType::Warning,
@@ -456,7 +458,9 @@ pub async fn reconcile_netbird_service(
                 statefulset_api.delete(&resource_name, &Default::default()).await?;
 
                 // Recreate the statefulset immediately.
-                info!("Re-creating statefulset for service `{svc_name}` after deletion due to volumeClaimTemplate changes.");
+                info!(
+                    "Re-creating statefulset for service `{svc_name}` after deletion due to volumeClaimTemplate changes."
+                );
                 statefulset_api.create(&PostParams::default(), &statefulset).await?;
                 info!("Re-created statefulset for service `{svc_name}`");
             } else {
