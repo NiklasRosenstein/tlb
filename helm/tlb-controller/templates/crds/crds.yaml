@@ -81,7 +81,7 @@ spec:
                     - name
                     type: object
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:
@@ -179,7 +179,7 @@ spec:
                     - name
                     type: object
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to `netbird up`.
+                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:

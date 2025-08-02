@@ -1,7 +1,10 @@
 use std::collections::HashSet;
 
 use k8s_openapi::{
-    api::{apps::v1::Deployment, core::v1::{Namespace, Service}},
+    api::{
+        apps::v1::Deployment,
+        core::v1::{Namespace, Service},
+    },
     apimachinery::pkg::apis::meta::v1::OwnerReference,
 };
 use kube::{
@@ -133,10 +136,7 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
             let deployment_api =
                 Api::<Deployment>::namespaced(ctx.context.client.clone(), ns.metadata.name.as_ref().unwrap());
             let deployments = deployment_api
-                .list(
-                    &ListParams::default()
-                        .labels(&format!("tlb.io/tunnel-class={}", tunnel_class_name)),
-                )
+                .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={}", tunnel_class_name)))
                 .await?;
 
             for deployment in deployments {
@@ -153,9 +153,7 @@ impl Reconcile<ReconcileContext> for TunnelClassInnerSpec {
                             "Deleting orphaned deployment `{}` for service `{}`",
                             deployment_name, service_name
                         );
-                        deployment_api
-                            .delete(deployment_name, &Default::default())
-                            .await?;
+                        deployment_api.delete(deployment_name, &Default::default()).await?;
                     }
                 }
             }
