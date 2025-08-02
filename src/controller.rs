@@ -238,7 +238,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     for service in services {
         let svc_name = service.metadata.name.as_ref().unwrap();
         let svc_namespace = service.metadata.namespace.as_ref().unwrap();
-        info!("Processing service `{}` in namespace `{}`", svc_name, svc_namespace);
+        info!("Processing service `{svc_name}` in namespace `{svc_namespace}`");
 
         // Publish an event for the service reconciliation.
         ctx.context
@@ -248,8 +248,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 EventType::Normal,
                 "Processing".into(),
                 Some(format!(
-                    "Reconciling service `{}` in namespace `{}` with tunnel class `{}`",
-                    svc_name, svc_namespace, tunnel_class_name
+                    "Reconciling service `{svc_name}` in namespace `{svc_namespace}` with tunnel class `{tunnel_class_name}`",
                 )),
                 "Reconcile".into(),
             )
@@ -321,7 +320,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
         {
             Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, true))),
             Err(e) => {
-                info!("Failed to list TunnelClasses: {}", e);
+                info!("Failed to list TunnelClasses: {e}");
             }
         };
 
@@ -332,7 +331,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
         {
             Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, false))),
             Err(e) => {
-                info!("Failed to list ClusterTunnelClasses: {}", e);
+                info!("Failed to list ClusterTunnelClasses: {e}");
             }
         };
 

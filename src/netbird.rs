@@ -2,17 +2,22 @@ use std::{collections::BTreeMap, time::Duration};
 
 use k8s_openapi::{
     api::{
-        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy},
+        apps::v1::{StatefulSet, StatefulSetSpec},
         core::v1::{
-            Affinity, Capabilities, Container, ContainerPort, EnvVar, EnvVarSource, LoadBalancerIngress, Pod, PodSpec,
-            PodTemplateSpec, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus,
+            Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
+            LoadBalancerIngress, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec,
+            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
+            VolumeResourceRequirements,
         },
     },
-    apimachinery::pkg::apis::meta::v1::{LabelSelector, OwnerReference},
+    apimachinery::pkg::{
+        api::resource::Quantity,
+        apis::meta::v1::{LabelSelector, OwnerReference},
+    },
 };
 use kube::{
     Api, Client, Resource,
-    api::{ObjectMeta, Patch, PatchParams},
+    api::{ObjectMeta, Patch, PatchParams, PostParams},
     core::Selector,
     runtime::events::EventType,
 };
@@ -152,16 +157,14 @@ pub async fn reconcile_netbird_service(
     tunnel_class_name: &str,
 ) -> Result<()> {
     let svc_name = service.metadata.name.as_ref().ok_or(Error::UnexpectedError(format!(
-        "Service does not have a name: {:?}",
-        service
+        "Service does not have a name: {service:?}"
     )))?;
     let svc_namespace = service
         .metadata
         .namespace
         .as_ref()
         .ok_or(Error::UnexpectedError(format!(
-            "Service `{}` does not have a namespace",
-            svc_name
+            "Service `{svc_name}` does not have a namespace"
         )))?;
     let cluster_ip = match service.spec.as_ref().and_then(|s| s.cluster_ip.clone()) {
         Some(ip) => ip,
@@ -188,10 +191,9 @@ pub async fn reconcile_netbird_service(
     // We need to run in the same namespace that has the secret. If the namespace of the secret is
     // not specified, we assume we're in a namespaced tunnel, so the secret and the service will
     // be in the same namespace.
-    let deployment_namespace = netbird.setup_key_ref.namespace.unwrap_or(svc_namespace.clone());
+    let resource_namespace = netbird.setup_key_ref.namespace.unwrap_or(svc_namespace.clone());
 
-    let deployment_api = Api::<Deployment>::namespaced(client.clone(), &deployment_namespace);
-    let pod_api = Api::<Pod>::namespaced(client.clone(), &deployment_namespace);
+    let pod_api = Api::<Pod>::namespaced(client.clone(), &resource_namespace);
     let svc_api = Api::<Service>::namespaced(client.clone(), svc_namespace);
 
     // Labels to match on for the Deployment.
@@ -202,6 +204,11 @@ pub async fn reconcile_netbird_service(
         ("tlb.io/tunnel-class".to_string(), tunnel_class_name.to_string()),
     ]);
 
+    let netbird_interface = netbird
+        .netbird_interface
+        .clone()
+        .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
+
     // Construct commands for setting up iptables in the Netbird pod.
     let launch_script = get_netbird_launch_script(
         netbird.forwarding_mode.unwrap_or(NetbirdForwardingMode::Socat),
@@ -211,9 +218,7 @@ pub async fn reconcile_netbird_service(
         netbird
             .cluster_interface
             .unwrap_or(DEFAULT_CLUSTER_INTERFACE.to_string()),
-        netbird
-            .netbird_interface
-            .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string()),
+        netbird_interface.clone(),
         netbird.up_command.unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
         &ports,
     );
@@ -254,7 +259,7 @@ pub async fn reconcile_netbird_service(
 
         // We use the first DNS name as the load balancer ingress host.
         if let Some(first_dns) = dns_names.first() {
-            lb_ingress_host = Some(format!("{}.{netbird_dns_domain}", first_dns));
+            lb_ingress_host = Some(format!("{first_dns}.{netbird_dns_domain}"));
         }
 
         // Add the DNS names as environment variables.
@@ -318,108 +323,180 @@ pub async fn reconcile_netbird_service(
         ..Default::default()
     };
 
-    // If there's only one replica, we need a different deployment strategy.
-    let deployment_strategy = if options.replicas == 1 {
-        DeploymentStrategy {
-            type_: Some("Recreate".into()),
-            rolling_update: None,
-        }
-    } else {
-        DeploymentStrategy {
-            type_: Some("RollingUpdate".into()),
-            rolling_update: None,
-        }
+    let pod_spec = PodSpec {
+        node_selector: Some(node_selector),
+        affinity: Some(affinity),
+        containers: vec![Container {
+            name: "netbird".into(),
+            image: Some(netbird.image.clone().unwrap_or(DEFAULT_NETBIRD_IMAGE.into())),
+            command: Some(vec!["/bin/sh".into(), "-c".into(), launch_script]),
+            env: Some(env),
+            security_context: Some(SecurityContext {
+                capabilities: Some(Capabilities {
+                    add: Some(vec!["NET_ADMIN".into()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ports: Some(vec![ContainerPort {
+                name: Some("peer-ip".into()),
+                protocol: Some("TCP".into()),
+                container_port: NETBIRD_PEER_IP_PORT.into(),
+                ..Default::default()
+            }]),
+            readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
+                exec: Some(k8s_openapi::api::core::v1::ExecAction {
+                    command: Some(
+                        vec!["ip", "addr", "show", &netbird_interface]
+                            .into_iter()
+                            .map(|s| s.into())
+                            .collect(),
+                    ),
+                }),
+                initial_delay_seconds: Some(5),
+                period_seconds: Some(30),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
     };
 
-    let deployment_prefix = netbird.deployment_prefix.unwrap_or_else(|| "tunnel-".to_string());
-    let deployment_name = format!("{deployment_prefix}{svc_name}");
-    let deployment = Deployment {
+    let mut pod_template = PodTemplateSpec {
+        metadata: Some(ObjectMeta {
+            labels: Some(match_labels.clone()),
+            ..Default::default()
+        }),
+        spec: Some(pod_spec),
+    };
+
+    let resource_name = format!(
+        "{}{}",
+        netbird.resource_prefix.unwrap_or_else(|| "tunnel-".to_string()),
+        svc_name
+    );
+
+    let mut statefulset_spec = StatefulSetSpec {
+        replicas: Some(options.replicas),
+        selector: LabelSelector {
+            match_labels: Some(match_labels.clone()),
+            ..Default::default()
+        },
+        service_name: Some(svc_name.clone()),
+        ..Default::default()
+    };
+
+    if let Some(storage_class) = &netbird.storage_class {
+        // persistent storage
+        let pvc = PersistentVolumeClaim {
+            metadata: ObjectMeta {
+                name: Some("netbird-data".into()),
+                ..Default::default()
+            },
+            spec: Some(PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".into()]),
+                storage_class_name: Some(storage_class.clone()),
+                resources: Some(VolumeResourceRequirements {
+                    requests: Some(BTreeMap::from([(
+                        "storage".to_string(),
+                        Quantity(netbird.size.clone().unwrap_or_else(|| "32Mi".to_string())),
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        statefulset_spec.volume_claim_templates = Some(vec![pvc]);
+    } else {
+        // emptyDir
+        pod_template.spec.as_mut().unwrap().volumes = Some(vec![Volume {
+            name: "netbird-data".into(),
+            empty_dir: Some(EmptyDirVolumeSource::default()),
+            ..Default::default()
+        }]);
+    }
+    let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
+    container.volume_mounts = Some(vec![VolumeMount {
+        name: "netbird-data".into(),
+        mount_path: "/var/lib/netbird".into(),
+        ..Default::default()
+    }]);
+
+    statefulset_spec.template = pod_template;
+
+    let statefulset = StatefulSet {
         metadata: ObjectMeta {
-            name: Some(deployment_name.clone()),
-            namespace: Some(deployment_namespace.clone()),
+            name: Some(resource_name.clone()),
+            namespace: Some(resource_namespace.clone()),
             owner_references: Some(owner_references),
             labels: Some(match_labels.clone()),
             ..Default::default()
         },
-        spec: Some(DeploymentSpec {
-            replicas: Some(options.replicas),
-            selector: LabelSelector {
-                match_labels: Some(match_labels.clone()),
-                ..Default::default()
-            },
-            strategy: Some(deployment_strategy),
-            template: PodTemplateSpec {
-                metadata: Some(ObjectMeta {
-                    labels: Some(match_labels.clone()),
-                    ..Default::default()
-                }),
-                spec: Some(PodSpec {
-                    node_selector: Some(node_selector),
-                    affinity: Some(affinity),
-                    containers: vec![Container {
-                        name: "netbird".into(),
-                        image: Some(netbird.image.unwrap_or(DEFAULT_NETBIRD_IMAGE.into())),
-                        command: Some(vec!["/bin/sh".into(), "-c".into(), launch_script]),
-                        env: Some(env),
-                        security_context: Some(SecurityContext {
-                            capabilities: Some(Capabilities {
-                                add: Some(vec!["NET_ADMIN".into()]),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
-                        ports: Some(vec![ContainerPort {
-                            name: Some("peer-ip".into()),
-                            protocol: Some("TCP".into()),
-                            container_port: NETBIRD_PEER_IP_PORT.into(),
-                            ..Default::default()
-                        }]),
-                        readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
-                            exec: Some(k8s_openapi::api::core::v1::ExecAction {
-                                command: Some(
-                                    vec!["ip", "addr", "show", DEFAULT_NETBIRD_INTERFACE]
-                                        .into_iter()
-                                        .map(|s| s.into())
-                                        .collect(),
-                                ),
-                            }),
-                            initial_delay_seconds: Some(5),
-                            period_seconds: Some(30),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                }),
-            },
-            ..Default::default()
-        }),
+        spec: Some(statefulset_spec),
         ..Default::default()
     };
 
-    // Patch or create the deployment.
-    match deployment_api.get_opt(&deployment_name).await? {
-        Some(_existing) => {
-            // Patch the deployment if it exists (server-side apply)
-            use kube::api::{Patch, PatchParams};
-            deployment_api
+    let statefulset_api = Api::<StatefulSet>::namespaced(client.clone(), &resource_namespace);
+    // Patch or create the statefulset.
+    match statefulset_api.get_opt(&resource_name).await? {
+        Some(_) => {
+            // It exists, so let's patch it.
+            match statefulset_api
                 .patch(
-                    &deployment_name,
+                    &resource_name,
                     &PatchParams::apply("tlb-controller").force(),
-                    &Patch::Apply(&deployment),
+                    &Patch::Apply(&statefulset),
                 )
-                .await?;
-            info!("Patched deployment for service `{}`", svc_name);
+                .await
+            {
+                Ok(_) => {
+                    info!("Patched statefulset for service `{svc_name}`");
+                }
+                Err(kube::Error::Api(e)) if e.code == 422 => {
+                    info!(
+                        "Patching StatefulSet '{}' failed, likely due to immutable field change. Deleting and recreating.",
+                        resource_name
+                    );
+                    events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            "StatefulSetRecreation".into(),
+                            Some(format!(
+                                "Patch for StatefulSet '{resource_name}' failed. Deleting and recreating."
+                            )),
+                            "Reconcile".into(),
+                        )
+                        .await?;
+                    statefulset_api.delete(&resource_name, &Default::default()).await?;
+
+                    // Recreate the statefulset immediately.
+                    info!("Re-creating statefulset for service `{svc_name}` after deletion.");
+                    statefulset_api.create(&PostParams::default(), &statefulset).await?;
+                    info!("Re-created statefulset for service `{svc_name}`");
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
         }
         None => {
-            // Create the deployment if it does not exist
-            use kube::api::PostParams;
-            deployment_api.create(&PostParams::default(), &deployment).await?;
-            info!("Created deployment for service `{}`", svc_name);
+            // It does not exist, so create it.
+            statefulset_api.create(&PostParams::default(), &statefulset).await?;
+            info!("Created statefulset for service `{svc_name}`");
         }
     }
 
-    // Find all pods that match the deployment's selector.
+    // Also need to delete the deployment if it exists from a previous version
+    use k8s_openapi::api::apps::v1::Deployment;
+    let deployment_api = Api::<Deployment>::namespaced(client.clone(), &resource_namespace);
+    if deployment_api.get_opt(&resource_name).await?.is_some() {
+        info!("Deleting deployment `{resource_name}` for service `{svc_name}` as it is now a statefulset");
+        deployment_api.delete(&resource_name, &Default::default()).await?;
+    }
+
+    // Find all pods that match the resource's selector.
     let pods = pod_api
         .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels.into_iter())))
         .await?;
@@ -459,7 +536,7 @@ pub async fn reconcile_netbird_service(
     let ps = PatchParams::apply("tlb-controller").force();
     svc_api.patch_status(svc_name, &ps, &new_status).await?;
 
-    info!("Patched status for service `{}`", svc_name);
+    info!("Patched status for service `{svc_name}`");
 
     Ok(())
 }
@@ -492,7 +569,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
                     &pod.object_ref(&()),
                     EventType::Warning,
                     "PodNotReady".into(),
-                    Some(format!("Pod `{}` is not ready", pod_name)),
+                    Some(format!("Pod `{pod_name}` is not ready")),
                     "Reconcile".into(),
                 )
                 .await?;
@@ -503,12 +580,11 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
             .status
             .as_ref()
             .and_then(|s| s.pod_ip.clone())
-            .ok_or_else(|| Error::UnexpectedError(format!("Pod `{}` does not have an IP", pod_name)))?;
+            .ok_or_else(|| Error::UnexpectedError(format!("Pod `{pod_name}` does not have an IP")))?;
 
         // Attempt to connect to the Netbird peer IP server on the pod's IP and port.
         info!(
-            "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{}` at {}:{}",
-            pod_name, pod_ip, NETBIRD_PEER_IP_PORT
+            "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{pod_name}` at {pod_ip}:{NETBIRD_PEER_IP_PORT}"
         );
         let mut stream = match tokio::time::timeout(
             Duration::from_secs(5),
@@ -524,8 +600,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
                         EventType::Warning,
                         "PeerIPServerConnectionFailed".into(),
                         Some(format!(
-                            "Failed to connect to Netbird peer IP server on pod `{}`: {:?}",
-                            pod_name, e
+                            "Failed to connect to Netbird peer IP server on pod `{pod_name}`: {e:?}"
                         )),
                         "Reconcile".into(),
                     )
@@ -535,8 +610,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
         };
 
         info!(
-            "[peer-ip-server] Connected to Netbird peer IP server on pod `{}` at {}:{}",
-            pod_name, pod_ip, NETBIRD_PEER_IP_PORT
+            "[peer-ip-server] Connected to Netbird peer IP server on pod `{pod_name}` at {pod_ip}:{NETBIRD_PEER_IP_PORT}"
         );
         // Read a single line from the stream to get the Netbird peer IP.
         let mut reader = BufReader::new(&mut stream);
@@ -552,8 +626,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
                     EventType::Warning,
                     "PeerIPServerEmptyResponse".into(),
                     Some(format!(
-                        "Received empty response from Netbird peer IP server on pod `{}`",
-                        pod_name
+                        "Received empty response from Netbird peer IP server on pod `{pod_name}`"
                     )),
                     "Reconcile".into(),
                 )

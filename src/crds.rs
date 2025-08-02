@@ -63,8 +63,14 @@ pub struct NetbirdConfig {
     pub announce_type: Option<NetbirdAnnounceType>,
     /// How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
     pub forwarding_mode: Option<NetbirdForwardingMode>,
-    /// Prefix for the Deployment that is created for the Netbird tunnel. Defaults to `tunnel-`.
-    pub deployment_prefix: Option<String>,
+    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+    pub resource_prefix: Option<String>,
+    /// The storage class to use for the persistent volume claim. If this is not set, an emptyDir
+    /// will be used.
+    pub storage_class: Option<String>,
+    /// The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage
+    /// classes have a minimum size, so you might need to adjust this value.
+    pub size: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
