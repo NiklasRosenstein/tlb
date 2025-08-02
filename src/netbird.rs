@@ -440,45 +440,51 @@ pub async fn reconcile_netbird_service(
     let statefulset_api = Api::<StatefulSet>::namespaced(client.clone(), &resource_namespace);
     // Patch or create the statefulset.
     match statefulset_api.get_opt(&resource_name).await? {
-        Some(existing) => {
-            let existing_vc_templates = existing.spec.as_ref().and_then(|s| s.volume_claim_templates.clone());
-            let new_vc_templates = statefulset.spec.as_ref().and_then(|s| s.volume_claim_templates.clone());
+        Some(_) => {
+            // It exists, so let's patch it.
+            match statefulset_api
+                .patch(
+                    &resource_name,
+                    &PatchParams::apply("tlb-controller").force(),
+                    &Patch::Apply(&statefulset),
+                )
+                .await
+            {
+                Ok(_) => {
+                    info!("Patched statefulset for service `{svc_name}`");
+                }
+                Err(kube::Error::Api(e)) if e.code == 422 => {
+                    info!(
+                        "Patching StatefulSet '{}' failed, likely due to immutable field change. Deleting and recreating.",
+                        resource_name
+                    );
+                    events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            "StatefulSetRecreation".into(),
+                            Some(format!(
+                                "Patch for StatefulSet '{resource_name}' failed. Deleting and recreating."
+                            )),
+                            "Reconcile".into(),
+                        )
+                        .await?;
+                    statefulset_api.delete(&resource_name, &Default::default()).await?;
 
-            if existing_vc_templates != new_vc_templates {
-                // volumeClaimTemplates have changed, which is not allowed.
-                // We need to delete and recreate the StatefulSet.
-                info!(
-                    "volumeClaimTemplates for StatefulSet '{}' have changed. Deleting.",
-                    resource_name
-                );
-                events.publish(
-                    &service.object_ref(&()),
-                    EventType::Warning,
-                    "StatefulSetRecreation".into(),
-                    Some(format!("volumeClaimTemplates for StatefulSet '{resource_name}' have changed. Deleting and recreating.")),
-                    "Reconcile".into(),
-                ).await?;
-                statefulset_api.delete(&resource_name, &Default::default()).await?;
-
-                // Recreate the statefulset immediately.
-                info!(
-                    "Re-creating statefulset for service `{svc_name}` after deletion due to volumeClaimTemplate changes."
-                );
-                statefulset_api.create(&PostParams::default(), &statefulset).await?;
-                info!("Re-created statefulset for service `{svc_name}`");
-            } else {
-                // No change in volumeClaimTemplates, so we can patch.
-                statefulset_api
-                    .patch(
-                        &resource_name,
-                        &PatchParams::apply("tlb-controller").force(),
-                        &Patch::Apply(&statefulset),
-                    )
-                    .await?;
-                info!("Patched statefulset for service `{svc_name}`");
+                    // Recreate the statefulset immediately.
+                    info!("Re-creating statefulset for service `{svc_name}` after deletion.");
+                    statefulset_api
+                        .create(&PostParams::default(), &statefulset)
+                        .await?;
+                    info!("Re-created statefulset for service `{svc_name}`");
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
             }
         }
         None => {
+            // It does not exist, so create it.
             statefulset_api.create(&PostParams::default(), &statefulset).await?;
             info!("Created statefulset for service `{svc_name}`");
         }
