@@ -29,6 +29,21 @@ pub struct TunnelClassSpec {
 #[serde(rename_all = "camelCase")]
 pub struct TunnelClassInnerSpec {
     pub netbird: Option<NetbirdConfig>,
+    pub cloudflare: Option<CloudflareConfig>,
+}
+
+///
+/// Configuration for creating Cloudflare tunnels.
+///
+#[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareConfig {
+    pub api_token_ref: SeretKeyRef,
+    pub account_id: String,
+    /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+    pub image: Option<String>,
+    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+    pub resource_prefix: Option<String>,
 }
 
 ///

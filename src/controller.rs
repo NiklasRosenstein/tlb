@@ -1,54 +1,51 @@
 use std::collections::HashSet;
 
-use k8s_openapi::{
-    api::{
-        apps::v1::Deployment,
-        core::v1::{Namespace, Service},
-    },
-    apimachinery::pkg::apis::meta::v1::OwnerReference,
+use k8s_openapi::api::{
+    apps::v1::{Deployment, StatefulSet},
+    core::v1::{Namespace, Secret, Service},
 };
 use kube::{
-    api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams, Resource},
-    runtime::{controller::Action, events::EventType},
+    api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams},
+    runtime::controller::Action,
 };
 use log::info;
 use serde_json::json;
 use tlb::{
-    Error, Result,
+    Error, Result, TunnelProvider,
     crds::{ClusterTunnelClass, TunnelClass, TunnelClassInnerSpec},
     simpleevent::SimpleEventRecorder,
 };
 
+use tlb::ReconcileContext;
+
 const FINALIZER_NAME: &str = "tlb.io/finalizer";
-
-///
-/// Context for the controller, containing the Kubernetes client and event recorder.
-///
-#[derive(Clone)]
-struct Context {
-    pub client: kube::Client,
-    pub events: SimpleEventRecorder,
-}
-
-///
-/// Context for reconciling that includes the resource metadata. If reconciling a [`TunnelClass`],
-/// the `namespaced` field is `true`. It is set to `false` when reconciling a [`ClusterTunnelClass`].
-///
-#[derive(Clone)]
-struct ReconcileContext {
-    pub context: Context,
-    pub metadata: kube::api::ObjectMeta,
-    pub namespaced: bool,
-}
 
 /// Returns all deployments that were created by this tunnel class.
 async fn get_deployments(ctx: &ReconcileContext) -> Result<Vec<Deployment>> {
     let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
-    let deployment_api = Api::<Deployment>::all(ctx.context.client.clone());
+    let deployment_api = Api::<Deployment>::all(ctx.client.clone());
     let deployments = deployment_api
-        .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={}", tunnel_class_name)))
+        .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={tunnel_class_name}")))
         .await?;
     Ok(deployments.items)
+}
+
+async fn get_secrets(ctx: &ReconcileContext) -> Result<Vec<Secret>> {
+    let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
+    let secret_api = Api::<Secret>::all(ctx.client.clone());
+    let secrets = secret_api
+        .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={tunnel_class_name}")))
+        .await?;
+    Ok(secrets.items)
+}
+
+async fn get_statefulsets(ctx: &ReconcileContext) -> Result<Vec<StatefulSet>> {
+    let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
+    let statefulset_api = Api::<StatefulSet>::all(ctx.client.clone());
+    let statefulsets = statefulset_api
+        .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={tunnel_class_name}")))
+        .await?;
+    Ok(statefulsets.items)
 }
 
 async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) -> Result<Action> {
@@ -73,28 +70,47 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
 
     let tunnel_class_api: Api<DynamicObject> = if ctx.namespaced {
         Api::namespaced_with(
-            ctx.context.client.clone(),
+            ctx.client.clone(),
             ctx.metadata.namespace.as_ref().unwrap(),
             &api_resource,
         )
     } else {
-        Api::all_with(ctx.context.client.clone(), &api_resource)
+        Api::all_with(ctx.client.clone(), &api_resource)
     };
 
     if ctx.metadata.deletion_timestamp.is_some() {
-        info!("Deleting tunnel class `{}`", tunnel_class_name);
+        info!("Deleting tunnel class `{tunnel_class_name}`");
 
         // Clean up all deployments that were created by this tunnel class.
         let deployments = get_deployments(ctx).await?;
         for deployment in deployments {
             let deployment_name = deployment.metadata.name.as_ref().unwrap();
             let deployment_namespace = deployment.metadata.namespace.as_ref().unwrap();
-            info!(
-                "Deleting deployment `{}` in namespace `{}`",
-                deployment_name, deployment_namespace
-            );
-            Api::<Deployment>::namespaced(ctx.context.client.clone(), deployment_namespace)
+            info!("Deleting deployment `{deployment_name}` in namespace `{deployment_namespace}`");
+            Api::<Deployment>::namespaced(ctx.client.clone(), deployment_namespace)
                 .delete(deployment_name, &Default::default())
+                .await?;
+        }
+
+        // Clean up all statefulsets that were created by this tunnel class.
+        let statefulsets = get_statefulsets(ctx).await?;
+        for statefulset in statefulsets {
+            let statefulset_name = statefulset.metadata.name.as_ref().unwrap();
+            let statefulset_namespace = statefulset.metadata.namespace.as_ref().unwrap();
+            info!("Deleting statefulset `{statefulset_name}` in namespace `{statefulset_namespace}`");
+            Api::<StatefulSet>::namespaced(ctx.client.clone(), statefulset_namespace)
+                .delete(statefulset_name, &Default::default())
+                .await?;
+        }
+
+        // Clean up all secrets that were created by this tunnel class.
+        let secrets = get_secrets(ctx).await?;
+        for secret in secrets {
+            let secret_name = secret.metadata.name.as_ref().unwrap();
+            let secret_namespace = secret.metadata.namespace.as_ref().unwrap();
+            info!("Deleting secret `{secret_name}` in namespace `{secret_namespace}`");
+            Api::<Secret>::namespaced(ctx.client.clone(), secret_namespace)
+                .delete(secret_name, &Default::default())
                 .await?;
         }
 
@@ -157,12 +173,12 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     let namespaces: Vec<Namespace> = if ctx.namespaced {
         assert!(namespace.is_some());
         vec![
-            Api::<Namespace>::all(ctx.context.client.clone())
+            Api::<Namespace>::all(ctx.client.clone())
                 .get(namespace.as_ref().unwrap())
                 .await?,
         ]
     } else {
-        Api::<Namespace>::all(ctx.context.client.clone())
+        Api::<Namespace>::all(ctx.client.clone())
             .list(&ListParams::default())
             .await?
             .into_iter()
@@ -171,8 +187,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
 
     let load_balancer_class = format!("tlb.io/{tunnel_class_name}");
     info!(
-        "Reconciling tunnel class `{}` in namespaces: {}",
-        tunnel_class_name,
+        "Reconciling tunnel class `{tunnel_class_name}` in namespaces: {}",
         namespaces
             .iter()
             .map(|ns| ns.metadata.name.clone().unwrap())
@@ -184,7 +199,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     let mut services: Vec<Service> = Vec::new();
     for ns in &namespaces {
         let ns_name = ns.metadata.name.as_ref().unwrap();
-        let svc_list = Api::<Service>::namespaced(ctx.context.client.clone(), ns_name)
+        let svc_list = Api::<Service>::namespaced(ctx.client.clone(), ns_name)
             .list(&ListParams::default())
             .await?
             .into_iter()
@@ -194,9 +209,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         services.extend(svc_list);
     }
     info!(
-        "Found {} matching service(s) with load balancer class `{}` in namespaces: {}",
+        "Found {} matching service(s) with load balancer class `{load_balancer_class}` in namespaces: {}",
         services.len(),
-        load_balancer_class,
         namespaces
             .iter()
             .map(|ns| ns.metadata.name.clone().unwrap())
@@ -208,10 +222,9 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     let services_with_lb_class: HashSet<String> = services.iter().map(|s| s.metadata.name.clone().unwrap()).collect();
 
     for ns in &namespaces {
-        let deployment_api =
-            Api::<Deployment>::namespaced(ctx.context.client.clone(), ns.metadata.name.as_ref().unwrap());
+        let deployment_api = Api::<Deployment>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
         let deployments = deployment_api
-            .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={}", tunnel_class_name)))
+            .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={tunnel_class_name}")))
             .await?;
 
         for deployment in deployments {
@@ -224,72 +237,68 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
 
             if let Some(service_name) = service_name_label {
                 if !services_with_lb_class.contains(service_name) {
-                    info!(
-                        "Deleting orphaned deployment `{}` for service `{}`",
-                        deployment_name, service_name
-                    );
+                    info!("Deleting orphaned deployment `{deployment_name}` for service `{service_name}`");
                     deployment_api.delete(deployment_name, &Default::default()).await?;
                 }
             }
         }
     }
 
+    // Clean up orphaned secrets.
+    for ns in &namespaces {
+        let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
+        let secrets = secret_api
+            .list(&ListParams::default().labels(&format!("tlb.io/tunnel-class={tunnel_class_name}")))
+            .await?;
+
+        for secret in secrets {
+            let secret_name = secret.metadata.name.as_ref().unwrap();
+            let service_name_label = secret
+                .metadata
+                .labels
+                .as_ref()
+                .and_then(|l| l.get("tlb.io/for-service"));
+
+            if let Some(service_name) = service_name_label {
+                if !services_with_lb_class.contains(service_name) {
+                    info!("Deleting orphaned secret `{secret_name}` for service `{service_name}`");
+                    secret_api.delete(secret_name, &Default::default()).await?;
+                }
+            }
+        }
+    }
+
+    let all_providers: Vec<Box<dyn TunnelProvider>> = vec![
+        Box::new(tlb::crds::NetbirdConfig::default()),
+        Box::new(tlb::crds::CloudflareConfig::default()),
+    ];
+
+    let active_providers: Vec<Box<dyn TunnelProvider>> = vec![
+        tunnel_class
+            .netbird
+            .as_ref()
+            .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
+        tunnel_class
+            .cloudflare
+            .as_ref()
+            .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
     // Process each individual service.
     for service in services {
-        let svc_name = service.metadata.name.as_ref().unwrap();
-        let svc_namespace = service.metadata.namespace.as_ref().unwrap();
-        info!("Processing service `{svc_name}` in namespace `{svc_namespace}`");
+        // Cleanup resources from providers that are no longer configured.
+        for provider_to_cleanup in all_providers.iter() {
+            if !active_providers.iter().any(|p| p.name() == provider_to_cleanup.name()) {
+                provider_to_cleanup.cleanup_service(ctx, &service).await?;
+            }
+        }
 
-        // Publish an event for the service reconciliation.
-        ctx.context
-            .events
-            .publish(
-                &service.object_ref(&()),
-                EventType::Normal,
-                "Processing".into(),
-                Some(format!(
-                    "Reconciling service `{svc_name}` in namespace `{svc_namespace}` with tunnel class `{tunnel_class_name}`",
-                )),
-                "Reconcile".into(),
-            )
-            .await?;
-
-        let options = tlb::ServiceAnnotations::from(service.metadata.annotations.clone().unwrap_or_default());
-
-        let owner_references = vec![
-            OwnerReference {
-                api_version: "v1".into(),
-                kind: "Service".into(),
-                name: svc_name.clone(),
-                uid: service.metadata.uid.clone().unwrap_or_default(),
-                controller: Some(false),
-                block_owner_deletion: Some(true),
-            },
-            OwnerReference {
-                api_version: "tlb.io/v1alpha1".into(),
-                kind: if ctx.namespaced {
-                    "TunnelClass".into()
-                } else {
-                    "ClusterTunnelClass".into()
-                },
-                name: tunnel_class_name.to_string(),
-                uid: ctx.metadata.uid.clone().unwrap_or_default(),
-                controller: Some(true),
-                block_owner_deletion: Some(true),
-            },
-        ];
-
-        if let Some(netbird) = tunnel_class.netbird.clone() {
-            tlb::netbird::reconcile_netbird_service(
-                &ctx.context.client,
-                &ctx.context.events,
-                owner_references,
-                service,
-                options,
-                netbird,
-                tunnel_class_name,
-            )
-            .await?;
+        // Reconcile for the current providers.
+        for provider in active_providers.iter() {
+            provider.reconcile_service(ctx, &service).await?;
         }
     }
 
@@ -300,10 +309,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
     let client = kube::Client::try_default()
         .await
         .expect("failed to create kube::Client");
-    let context = Context {
-        client: client.clone(),
-        events: SimpleEventRecorder::from_client(client, "tlb-controller"),
-    };
+    let events = SimpleEventRecorder::from_client(client.clone(), "tlb-controller");
 
     // Periodically reconcile all tunnel classes.
     // TODO: Instead, watch services and trigger a reconciliation when a service is created or updated?
@@ -314,7 +320,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
         let mut tunnel_classes = Vec::new();
 
         // Fetch all namespace-scoped tunnel classes.
-        match Api::<TunnelClass>::all(context.client.clone())
+        match Api::<TunnelClass>::all(client.clone())
             .list(&ListParams::default())
             .await
         {
@@ -325,7 +331,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
         };
 
         // Fetch all cluster-scoped tunnel classes.
-        match Api::<ClusterTunnelClass>::all(context.client.clone())
+        match Api::<ClusterTunnelClass>::all(client.clone())
             .list(&ListParams::default())
             .await
         {
@@ -337,7 +343,8 @@ pub async fn run(reconcile_interval: std::time::Duration) {
 
         for tunnel_class in tunnel_classes {
             let ctx = ReconcileContext {
-                context: context.clone(),
+                client: client.clone(),
+                events: events.clone(),
                 metadata: tunnel_class.1.clone(),
                 namespaced: tunnel_class.2,
             };

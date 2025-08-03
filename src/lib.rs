@@ -1,10 +1,35 @@
 use std::collections::BTreeMap;
 
-use kube::runtime::controller::Action;
+use async_trait::async_trait;
+use k8s_openapi::api::core::v1::Service;
+use kube::{Client, runtime::controller::Action};
 
+use crate::simpleevent::SimpleEventRecorder;
+
+pub mod cloudflare;
 pub mod crds;
 pub mod netbird;
 pub mod simpleevent;
+
+pub const MANAGED_BY_LABEL: &str = "tlb.io/managed-by";
+pub const TUNNEL_CLASS_LABEL: &str = "tlb.io/tunnel-class";
+pub const FOR_SERVICE_LABEL: &str = "tlb.io/for-service";
+pub const PROVIDER_LABEL: &str = "tlb.io/provider";
+
+#[derive(Clone)]
+pub struct ReconcileContext {
+    pub client: Client,
+    pub events: SimpleEventRecorder,
+    pub metadata: kube::api::ObjectMeta,
+    pub namespaced: bool,
+}
+
+#[async_trait]
+pub trait TunnelProvider {
+    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
+    async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
+    fn name(&self) -> &'static str;
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -19,6 +44,12 @@ pub enum Error {
 
     #[error("IO Error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("Cloudflare Error: {0}")]
+    CloudflareError(String),
+
+    #[error("Configuration Error: {0}")]
+    ConfigError(String),
 
     #[error("An unexpected error occurred: {0}")]
     UnexpectedError(String),
