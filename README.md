@@ -67,20 +67,13 @@ spec:
 
 ## Known issues
 
-### NetBird
-
-- Pods created by the controller do not retain their identity. When they are re-scheduled, they will connect as new
-  peers to the cluster and be assigned fresh IPs. It takes a while for the new IPs to propagate from the Pod, to the
-  Service, to Ingresses and eventually, if you are using it, to be updated by external-dns and eventually make it
-  through your computer's DNS cache.
-
 ## Work in progress
 
 - [x] Basic controller loop
 - [ ] Use Kubernetes Watch API to watch for changes
 - [ ] Skip reconciling cluster-scoped tunnel class if same-named namespaced tunnel class exists
 - [ ] Netbird support
-  - [x] Creation of `Deployment` resources for matching `Service` resources
+  - [x] Creation of `StatefulSet` resources for matching `Service` resources
   - [x] Population of `Service.spec.loadBalancerStatus` with the first DNS name specified in the `tlb.io/dns` annotation
   - [x] Support for `tlb.io/dns`
   - [x] Support for `tlb.io/replicas`
@@ -88,6 +81,7 @@ spec:
   - [x] Support for `tlb.io/node-selector`
   - [x] Cleanup on `Service` change or deletion
   - [x] Cleanup on `TunnelClass` deletion
-  - [ ] Update `Deployment` on `Service` only when they actually changed
+  - [x] Persistent Netbird peer identity over Pod restarts (when `storageClass` is set)
+  - [ ] Update `StatefulSet` on `Service` only when they actually changed
 - [ ] Cloudflare support
 - [ ] Tailscale support
