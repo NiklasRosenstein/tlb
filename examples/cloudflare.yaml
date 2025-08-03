@@ -1,0 +1,57 @@
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: cloudflare
+spec:
+  cloudflare:
+    accountId: your_account_id
+    apiTokenRef:
+      name: cloudflare-api-key
+      namespace: default
+      key: token
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloudflare-api-key
+type: Opaque
+stringData:
+  token: your_api_key_here
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-hello-world
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/cloudflare
+  selector:
+    app: nginx-hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-hello-world
+  template:
+    metadata:
+      labels:
+        app: nginx-hello-world
+    spec:
+      containers:
+        - name: nginx-hello-world
+          image: nginx:latest
+          ports:
+            - containerPort: 80
