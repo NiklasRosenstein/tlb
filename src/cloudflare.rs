@@ -24,7 +24,7 @@ use crate::{
     crds::{CloudflareConfig, SeretKeyRef},
 };
 
-use crate::{FOR_SERVICE_LABEL, MANAGED_BY_LABEL, PROVIDER_LABEL, TUNNEL_CLASS_LABEL};
+use crate::{FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL};
 
 const FINALIZER_NAME: &str = "tlb.io/cloudflare-tunnel";
 const DEFAULT_CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared:latest";
@@ -222,9 +222,8 @@ impl TunnelProvider for CloudflareConfig {
                     finalizers: Some(vec![FINALIZER_NAME.to_string()]),
                     owner_references: Some(owner_references.clone()),
                     labels: Some(BTreeMap::from([
-                        (MANAGED_BY_LABEL.to_string(), "tlb".to_string()),
                         (
-                            TUNNEL_CLASS_LABEL.to_string(),
+                            FOR_TUNNEL_CLASS_LABEL.to_string(),
                             ctx.metadata.name.as_ref().unwrap().to_string(),
                         ),
                         (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
@@ -251,9 +250,8 @@ impl TunnelProvider for CloudflareConfig {
                 namespace: Some(svc_namespace.clone()),
                 owner_references: Some(owner_references),
                 labels: Some(BTreeMap::from([
-                    (MANAGED_BY_LABEL.to_string(), "tlb".to_string()),
                     (
-                        TUNNEL_CLASS_LABEL.to_string(),
+                        FOR_TUNNEL_CLASS_LABEL.to_string(),
                         ctx.metadata.name.as_ref().unwrap().to_string(),
                     ),
                     (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),

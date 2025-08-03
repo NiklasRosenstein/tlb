@@ -206,7 +206,7 @@ impl TunnelProvider for NetbirdConfig {
             ("app.kubernetes.io/name".to_string(), "netbird".to_string()),
             ("app.kubernetes.io/instance".to_string(), svc_name.to_string()),
             (crate::FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-            (crate::TUNNEL_CLASS_LABEL.to_string(), tunnel_class_name.to_string()),
+            (crate::FOR_TUNNEL_CLASS_LABEL.to_string(), tunnel_class_name.to_string()),
             (crate::PROVIDER_LABEL.to_string(), "netbird".to_string()),
         ]);
 

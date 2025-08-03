@@ -11,10 +11,9 @@ pub mod crds;
 pub mod netbird;
 pub mod simpleevent;
 
-pub const MANAGED_BY_LABEL: &str = "tlb.io/managed-by";
-pub const TUNNEL_CLASS_LABEL: &str = "tlb.io/tunnel-class";
-pub const FOR_SERVICE_LABEL: &str = "tlb.io/for-service";
-pub const PROVIDER_LABEL: &str = "tlb.io/provider";
+pub const FOR_TUNNEL_CLASS_LABEL: &str = "controller.tlb.io/for-tunnel-class";
+pub const FOR_SERVICE_LABEL: &str = "controller.tlb.io/for-service";
+pub const PROVIDER_LABEL: &str = "controller.tlb.io/provider";
 
 #[derive(Clone)]
 pub struct ReconcileContext {

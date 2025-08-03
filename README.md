@@ -65,6 +65,15 @@ spec:
 - `tlb.io/node-selector`: A comma-separated list of node labels to select nodes for the tunnel. This is useful for
   targeting specific nodes in your cluster.
 
+## Controller labels
+
+The following labels are used by the controller on resources it creates:
+
+- `controller.tlb.io/for-service`: Added to resources to remember what `Service` they were created for.
+- `controller.tlb.io/for-tunnel-class`: Added to resources to remember what `(Cluster)TunnelClass` they were created
+  for.
+- `controller.tlb.io/provider`: The name of the tunnel provider that the resource was created for.
+
 ## Known issues
 
 ## Work in progress
