@@ -74,7 +74,10 @@ The following labels are used by the controller on resources it creates:
   for.
 - `controller.tlb.io/provider`: The name of the tunnel provider that the resource was created for.
 
-## Known issues
+## Development
+
+- Always run `mise run ci` to test if CI will pass (formatting, compiling, linting, tests)
+- Run `mise run fmt` to format code
 
 ## Work in progress
 
