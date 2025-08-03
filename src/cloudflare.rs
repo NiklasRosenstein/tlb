@@ -156,26 +156,24 @@ impl TunnelProvider for CloudflareConfig {
         let cf_client = CloudflareApi::new(&api_token, &self.account_id);
 
         let resource_prefix = self.resource_prefix.clone().unwrap_or("tunnel-".to_string());
-    let secret_name = format!("{resource_prefix}{svc_name}");
+        let secret_name = format!("{resource_prefix}{svc_name}");
         let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &svc_namespace);
 
         let existing_secret = secret_api.get_opt(&secret_name).await?;
 
         if let Some(secret) = existing_secret {
             if secret.metadata.deletion_timestamp.is_some() {
-                info!(
-                "Secret {secret_name} for service {svc_name} is being deleted, cleaning up Cloudflare tunnel"
-                );
+                info!("Secret {secret_name} for service {svc_name} is being deleted, cleaning up Cloudflare tunnel");
 
                 if let Some(data) = secret.data {
                     if let Some(tunnel_id_bytes) = data.get("tunnel-id") {
                         let tunnel_id = String::from_utf8(tunnel_id_bytes.0.clone()).unwrap();
 
                         if let Err(e) = cf_client.delete_tunnel(&tunnel_id).await {
-                        error!("Failed to delete Cloudflare tunnel {tunnel_id}: {e}");
+                            error!("Failed to delete Cloudflare tunnel {tunnel_id}: {e}");
                             return Err(Error::CloudflareError(e.to_string()));
                         }
-                    info!("Successfully deleted Cloudflare tunnel {tunnel_id}");
+                        info!("Successfully deleted Cloudflare tunnel {tunnel_id}");
                     }
                 }
 

@@ -463,7 +463,7 @@ impl TunnelProvider for NetbirdConfig {
                     }
                     Err(kube::Error::Api(e)) if e.code == 422 => {
                         info!(
-                        "Patching StatefulSet '{resource_name}' failed, likely due to immutable field change. Deleting and recreating."
+                            "Patching StatefulSet '{resource_name}' failed, likely due to immutable field change. Deleting and recreating."
                         );
                         ctx.events
                             .publish(
