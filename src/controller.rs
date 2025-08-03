@@ -11,7 +11,7 @@ use kube::{
 use log::info;
 use serde_json::json;
 use tlb::{
-    Error, Result, TunnelProvider,
+    Error, FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, Result, TunnelProvider,
     crds::{ClusterTunnelClass, TunnelClass, TunnelClassInnerSpec},
     simpleevent::SimpleEventRecorder,
 };
@@ -25,7 +25,7 @@ async fn get_deployments(ctx: &ReconcileContext) -> Result<Vec<Deployment>> {
     let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
     let deployment_api = Api::<Deployment>::all(ctx.client.clone());
     let deployments = deployment_api
-        .list(&ListParams::default().labels(&format!("controller.tlb.io/for-tunnel-class={tunnel_class_name}")))
+        .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
         .await?;
     Ok(deployments.items)
 }
@@ -34,7 +34,7 @@ async fn get_secrets(ctx: &ReconcileContext) -> Result<Vec<Secret>> {
     let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
     let secret_api = Api::<Secret>::all(ctx.client.clone());
     let secrets = secret_api
-        .list(&ListParams::default().labels(&format!("controller.tlb.io/for-tunnel-class={tunnel_class_name}")))
+        .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
         .await?;
     Ok(secrets.items)
 }
@@ -43,7 +43,7 @@ async fn get_statefulsets(ctx: &ReconcileContext) -> Result<Vec<StatefulSet>> {
     let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
     let statefulset_api = Api::<StatefulSet>::all(ctx.client.clone());
     let statefulsets = statefulset_api
-        .list(&ListParams::default().labels(&format!("controller.tlb.io/for-tunnel-class={tunnel_class_name}")))
+        .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
         .await?;
     Ok(statefulsets.items)
 }
@@ -224,7 +224,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     for ns in &namespaces {
         let deployment_api = Api::<Deployment>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
         let deployments = deployment_api
-            .list(&ListParams::default().labels(&format!("controller.tlb.io/for-tunnel-class={tunnel_class_name}")))
+            .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
             .await?;
 
         for deployment in deployments {
@@ -233,7 +233,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 .metadata
                 .labels
                 .as_ref()
-                .and_then(|l| l.get("controller.tlb.io/for-service"));
+                .and_then(|l| l.get(FOR_SERVICE_LABEL));
 
             if let Some(service_name) = service_name_label {
                 if !services_with_lb_class.contains(service_name) {
@@ -248,16 +248,12 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     for ns in &namespaces {
         let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
         let secrets = secret_api
-            .list(&ListParams::default().labels(&format!("controller.tlb.io/for-tunnel-class={tunnel_class_name}")))
+            .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
             .await?;
 
         for secret in secrets {
             let secret_name = secret.metadata.name.as_ref().unwrap();
-            let service_name_label = secret
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get("controller.tlb.io/for-service"));
+            let service_name_label = secret.metadata.labels.as_ref().and_then(|l| l.get(FOR_SERVICE_LABEL));
 
             if let Some(service_name) = service_name_label {
                 if !services_with_lb_class.contains(service_name) {
