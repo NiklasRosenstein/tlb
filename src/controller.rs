@@ -28,6 +28,7 @@ const FINALIZER_NAME: &str = "tlb.io/finalizer";
 struct Context {
     pub client: kube::Client,
     pub events: SimpleEventRecorder,
+    pub tlb_controller_image: String,
 }
 
 ///
@@ -284,6 +285,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             tlb::netbird::reconcile_netbird_service(
                 &ctx.context.client,
                 &ctx.context.events,
+                &ctx.context.tlb_controller_image,
                 owner_references,
                 service,
                 options,
@@ -298,12 +300,15 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
 }
 
 pub async fn run(reconcile_interval: std::time::Duration) {
+    let tlb_controller_image =
+        std::env::var("TLB_CONTROLLER_IMAGE").expect("TLB_CONTROLLER_IMAGE environment variable not set");
     let client = kube::Client::try_default()
         .await
         .expect("failed to create kube::Client");
     let context = Context {
         client: client.clone(),
         events: SimpleEventRecorder::from_client(client, "tlb-controller"),
+        tlb_controller_image,
     };
 
     // Periodically reconcile all tunnel classes.

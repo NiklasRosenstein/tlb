@@ -42,109 +42,17 @@ const DEFAULT_ANNOUNCE_TYPE: NetbirdAnnounceType = NetbirdAnnounceType::IP;
 /// We launch a small TCP server on port `15411` in the tunnel Pod to expose the Netbird peer IP.
 pub const NETBIRD_PEER_IP_PORT: u16 = 15411;
 
-///
-/// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
-/// and launches the Netbird service.
-///
-#[allow(clippy::too_many_arguments)]
-fn get_netbird_launch_script(
-    forwarding_mode: NetbirdForwardingMode,
-    service_ip: String,
-    service_name: String,
-    service_namespace: String,
-    cluster_iface: String,
-    netbird_iface: String,
-    up_command: String,
-    ports: &[ServicePort],
-) -> String {
-    let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
-
-    match forwarding_mode {
-        NetbirdForwardingMode::Iptables => {
-            // Install iptables if it's not already installed.
-            launch_script.push("if ! command iptables >/dev/null; then apk add --no-cache iptables; fi".to_owned());
-        }
-        NetbirdForwardingMode::Socat | NetbirdForwardingMode::SocatWithDns => {
-            // Install socat if it's not already installed.
-            launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
-        }
-    }
-
-    ports.iter().for_each(|port| {
-        let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
-        let protocol_upper = protocol.to_uppercase();
-        let port = port.port;
-
-        match forwarding_mode {
-            NetbirdForwardingMode::Iptables => {
-                // Accept new connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -p {protocol} -d {service_ip} --dport {port} -m conntrack \
-                        --ctstate NEW -j ACCEPT"
-                ));
-
-                // Accept established connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
-                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-
-                // NAT packets destined for the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                        -p {protocol} --dport {port} -j DNAT \
-                        --to-destination {service_ip}:{port}"
-                ));
-
-                launch_script.push(format!(
-                    "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-                ));
-            }
-            NetbirdForwardingMode::Socat => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_ip}:{port} &"
-            )),
-            NetbirdForwardingMode::SocatWithDns => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_name}.{service_namespace}:{port} &"
-            )),
-        }
-
-        launch_script.push("apk add socat".to_owned());
-    });
-
-    // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
-    launch_script.push(format!(
-        "( \
-            while ! ip addr show {netbird_iface} &>/dev/null; do \
-                echo \"[peer-ip-server] Waiting for {netbird_iface} to come up...\"; \
-                sleep 1; \
-            done; \
-            peer_ip=$(ip addr show {netbird_iface} | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1); \
-            echo \"[peer-ip-server] {netbird_iface} is up with ip $peer_ip, serving on port {NETBIRD_PEER_IP_PORT}...\"; \
-            while true; do \
-                echo \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \
-            done \
-        ) &"
-    ));
-
-    launch_script.push(up_command);
-    launch_script.join("\n")
-}
 
 ///
 /// Given a Kubernetes `Service` object, that, assuming it does point or used to point to one of our tunnel
 /// load balancer classes, reconcile the Netbird service by creating or updating a Deployment that runs the Netbird
 /// service with NAT-ed forwarding rules for the service's cluster IP and ports.
 ///
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile_netbird_service(
     client: &Client,
     events: &SimpleEventRecorder,
+    tlb_controller_image: &str,
     owner_references: Vec<OwnerReference>,
     service: Service,
     options: ServiceAnnotations,
@@ -202,21 +110,35 @@ pub async fn reconcile_netbird_service(
         ("tlb.io/tunnel-class".to_string(), tunnel_class_name.to_string()),
     ]);
 
-    // Construct commands for setting up iptables in the Netbird pod.
-    let launch_script = get_netbird_launch_script(
-        netbird.forwarding_mode.unwrap_or(NetbirdForwardingMode::Socat),
-        cluster_ip,
+    // Extract TCP and UDP ports from the service spec.
+    let tcp_ports: Vec<u16> = ports
+        .iter()
+        .filter(|p| p.protocol.as_deref() == Some("TCP"))
+        .map(|p| p.port as u16)
+        .collect();
+    let udp_ports: Vec<u16> = ports
+        .iter()
+        .filter(|p| p.protocol.as_deref() == Some("UDP"))
+        .map(|p| p.port as u16)
+        .collect();
+
+    // Construct the command for the tlb binary.
+    let mut command = vec![
+        "/tlb/tlb".to_string(),
+        "internal".to_string(),
+        "netbird".to_string(),
+        "run".to_string(),
+        "--service-name".to_string(),
         svc_name.clone(),
-        svc_namespace.clone(),
-        netbird
-            .cluster_interface
-            .unwrap_or(DEFAULT_CLUSTER_INTERFACE.to_string()),
-        netbird
-            .netbird_interface
-            .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string()),
-        netbird.up_command.unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
-        &ports,
-    );
+    ];
+    for port in tcp_ports {
+        command.push("--tcp".to_string());
+        command.push(port.to_string());
+    }
+    for port in udp_ports {
+        command.push("--udp".to_string());
+        command.push(port.to_string());
+    }
 
     let mut env = vec![
         EnvVar {
@@ -356,10 +278,25 @@ pub async fn reconcile_netbird_service(
                 spec: Some(PodSpec {
                     node_selector: Some(node_selector),
                     affinity: Some(affinity),
+                    volumes: Some(vec![k8s_openapi::api::core::v1::Volume {
+                        name: "tlb-binary".into(),
+                        ..Default::default()
+                    }]),
+                    init_containers: Some(vec![Container {
+                        name: "tlb-binary-copy".into(),
+                        image: Some(tlb_controller_image.to_string()),
+                        command: Some(vec!["cp".into(), "/app/controller".into(), "/tlb/tlb".into()]),
+                        volume_mounts: Some(vec![k8s_openapi::api::core::v1::VolumeMount {
+                            name: "tlb-binary".into(),
+                            mount_path: "/tlb".into(),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }]),
                     containers: vec![Container {
                         name: "netbird".into(),
                         image: Some(netbird.image.unwrap_or(DEFAULT_NETBIRD_IMAGE.into())),
-                        command: Some(vec!["/bin/sh".into(), "-c".into(), launch_script]),
+                        command: Some(command),
                         env: Some(env),
                         security_context: Some(SecurityContext {
                             capabilities: Some(Capabilities {
@@ -372,6 +309,12 @@ pub async fn reconcile_netbird_service(
                             name: Some("peer-ip".into()),
                             protocol: Some("TCP".into()),
                             container_port: NETBIRD_PEER_IP_PORT.into(),
+                            ..Default::default()
+                        }]),
+                        volume_mounts: Some(vec![k8s_openapi::api::core::v1::VolumeMount {
+                            name: "tlb-binary".into(),
+                            mount_path: "/tlb".into(),
+                            read_only: Some(true),
                             ..Default::default()
                         }]),
                         readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
