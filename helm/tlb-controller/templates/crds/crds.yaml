@@ -28,6 +28,13 @@ spec:
                 properties:
                   accountId:
                     type: string
+                  announceType:
+                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    enum:
+                    - Internal
+                    - External
+                    nullable: true
+                    type: string
                   apiTokenRef:
                     description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
                     properties:
@@ -169,6 +176,13 @@ spec:
                 nullable: true
                 properties:
                   accountId:
+                    type: string
+                  announceType:
+                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    enum:
+                    - Internal
+                    - External
+                    nullable: true
                     type: string
                   apiTokenRef:
                     description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
