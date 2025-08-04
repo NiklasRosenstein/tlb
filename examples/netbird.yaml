@@ -10,6 +10,7 @@ spec:
       name: netbird-setup-key
       namespace: default
       key: setupKey
+    storageClass: standard
 
 ---
 apiVersion: v1
