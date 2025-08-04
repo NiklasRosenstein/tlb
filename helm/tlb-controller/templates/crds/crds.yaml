@@ -22,6 +22,49 @@ spec:
           spec:
             description: Define a namespaced tunnel class.
             properties:
+              cloudflare:
+                description: Configuration for creating Cloudflare tunnels.
+                nullable: true
+                properties:
+                  accountId:
+                    type: string
+                  announceType:
+                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    enum:
+                    - Internal
+                    - External
+                    nullable: true
+                    type: string
+                  apiTokenRef:
+                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        nullable: true
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  image:
+                    description: The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                    nullable: true
+                    type: string
+                  resourcePrefix:
+                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+                    nullable: true
+                    type: string
+                  tunnelPrefix:
+                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+                    nullable: true
+                    type: string
+                required:
+                - accountId
+                - apiTokenRef
+                type: object
               netbird:
                 description: |-
                   Configuration for creating Netbird tunnels.
@@ -128,6 +171,49 @@ spec:
           spec:
             description: Define a cluster-scoped tunnel class.
             properties:
+              cloudflare:
+                description: Configuration for creating Cloudflare tunnels.
+                nullable: true
+                properties:
+                  accountId:
+                    type: string
+                  announceType:
+                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    enum:
+                    - Internal
+                    - External
+                    nullable: true
+                    type: string
+                  apiTokenRef:
+                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    properties:
+                      key:
+                        type: string
+                      name:
+                        type: string
+                      namespace:
+                        nullable: true
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                  image:
+                    description: The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                    nullable: true
+                    type: string
+                  resourcePrefix:
+                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+                    nullable: true
+                    type: string
+                  tunnelPrefix:
+                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+                    nullable: true
+                    type: string
+                required:
+                - accountId
+                - apiTokenRef
+                type: object
               netbird:
                 description: |-
                   Configuration for creating Netbird tunnels.

@@ -29,6 +29,43 @@ pub struct TunnelClassSpec {
 #[serde(rename_all = "camelCase")]
 pub struct TunnelClassInnerSpec {
     pub netbird: Option<NetbirdConfig>,
+    pub cloudflare: Option<CloudflareConfig>,
+}
+
+///
+/// Configuration for creating Cloudflare tunnels.
+///
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareConfig {
+    pub api_token_ref: SeretKeyRef,
+    pub account_id: String,
+    /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+    pub image: Option<String>,
+    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+    pub resource_prefix: Option<String>,
+    /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+    pub tunnel_prefix: Option<String>,
+    /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
+    /// [`CloudflareAnnounceType::External`].
+    pub announce_type: Option<CloudflareAnnounceType>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+pub enum CloudflareAnnounceType {
+    /// Expose the tunnel using the internal Cloudflare tunnel name (e.g. `<uuid>.cfargotunnel.com`). This mode is
+    /// automatically when no `tlb.io/dns` annotation is set on the Service, or when the Cloudflare API token does not
+    /// have permissions to edit the DNS zone.
+    ///
+    /// This mode only works if something else sets the DNS records, such as external-dns with the Cloudflare provider.
+    /// Note that the CNAME DNS record that points to the tunnel _must_ have proxying enabled to work with the
+    /// Cloudflare tunnel.
+    Internal,
+    /// Announce the first DNS name in the `tlb.io/dns` annotation as a CNAME record pointing to the tunnel hostname.
+    /// This works best in most cases, but requires that the Cloudflare API token has permissions to edit the DNS zone.
+    /// If the DNS zone is not managed by the same Cloudflare account, this will not work. If the DNS zone cannot be
+    /// edited, the provider will fall back to [`CloudflareAnnounceType::Internal`].
+    External,
 }
 
 ///
@@ -37,7 +74,7 @@ pub struct TunnelClassInnerSpec {
 /// Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the
 /// pod and can therefore not be used by the service that is exposed by the tunnel.
 ///
-#[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NetbirdConfig {
     pub management_url: String,
@@ -114,7 +151,7 @@ pub enum NetbirdForwardingMode {
 /// Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
 /// otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
 ///
-#[derive(Deserialize, Serialize, Default, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SeretKeyRef {
     pub name: String,
