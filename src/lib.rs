@@ -10,6 +10,7 @@ use crate::simpleevent::SimpleEventRecorder;
 pub mod cloudflare;
 pub mod crds;
 pub mod netbird;
+pub mod pangolin;
 pub mod simpleevent;
 
 pub const FOR_TUNNEL_CLASS_LABEL: &str = "controller.tlb.io/for-tunnel-class";
@@ -28,6 +29,7 @@ pub struct ReconcileContext {
 pub enum ProviderType {
     Cloudflare,
     Netbird,
+    Pangolin,
 }
 
 impl ProviderType {
@@ -35,6 +37,7 @@ impl ProviderType {
         match self {
             ProviderType::Cloudflare => "cloudflare",
             ProviderType::Netbird => "netbird",
+            ProviderType::Pangolin => "pangolin",
         }
     }
 }

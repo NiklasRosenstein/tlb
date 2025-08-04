@@ -1,0 +1,60 @@
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: pangolin
+spec:
+  pangolin:
+    accountId: your-pangolin-account-id
+    apiTokenRef:
+      name: pangolin-api-key
+      namespace: default
+      key: token
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pangolin-api-key
+type: Opaque
+stringData:
+  token: your-pangolin-api-token
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-hello-world
+  annotations:
+    tlb.io/dns: hello.your-domain.com
+    tlb.io/protocol: "http"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/pangolin
+  selector:
+    app: nginx-hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-hello-world
+  template:
+    metadata:
+      labels:
+        app: nginx-hello-world
+    spec:
+      containers:
+        - name: nginx-hello-world
+          image: nginx:latest
+          ports:
+            - containerPort: 80

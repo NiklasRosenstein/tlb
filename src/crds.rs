@@ -30,6 +30,34 @@ pub struct TunnelClassSpec {
 pub struct TunnelClassInnerSpec {
     pub netbird: Option<NetbirdConfig>,
     pub cloudflare: Option<CloudflareConfig>,
+    pub pangolin: Option<PangolinConfig>,
+}
+
+///
+/// Configuration for creating Pangolin tunnels.
+///
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PangolinConfig {
+    pub api_token_ref: SeretKeyRef,
+    pub account_id: String,
+    /// The pangolin image to use for the tunnel pods. Defaults to `pangolin/pangolind:latest`.
+    pub image: Option<String>,
+    /// Prefix for the resources that are created for the Pangolin tunnel. Defaults to `pg-`.
+    pub resource_prefix: Option<String>,
+    /// Prefix for the name of the Pangolin tunnel. Defaults to `kube-`.
+    pub tunnel_prefix: Option<String>,
+    /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
+    /// [`PangolinAnnounceType::External`].
+    pub announce_type: Option<PangolinAnnounceType>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+pub enum PangolinAnnounceType {
+    /// Expose the tunnel using the internal Pangolin tunnel name (e.g. `<uuid>.pangolintunnel.com`).
+    Internal,
+    /// Announce the first DNS name in the `tlb.io/dns` annotation as a CNAME record pointing to the tunnel hostname.
+    External,
 }
 
 ///
