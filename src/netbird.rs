@@ -595,6 +595,30 @@ impl TunnelProvider for NetbirdConfig {
                 })?;
         }
 
+        // Clean up PVCs created by the StatefulSets
+        // PVCs created by StatefulSets inherit the StatefulSet's selector labels
+        let pvc_api = Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &svc_namespace);
+        let pvcs = pvc_api
+            .list(&kube::api::ListParams::default().labels(&label_selector))
+            .await
+            .map_err(|e| {
+                Error::UnexpectedError(format!(
+                    "Failed to list PVCs for service '{}' in namespace '{}': {}",
+                    svc_name, svc_namespace, e
+                ))
+            })?;
+
+        for pvc in pvcs {
+            let pvc_name = pvc.metadata.name.as_ref().unwrap();
+            info!("Deleting PVC `{pvc_name}` for service `{svc_name}`");
+            pvc_api.delete(pvc_name, &Default::default()).await.map_err(|e| {
+                Error::UnexpectedError(format!(
+                    "Failed to delete PVC '{}' for service '{}': {}",
+                    pvc_name, svc_name, e
+                ))
+            })?;
+        }
+
         Ok(())
     }
 }
