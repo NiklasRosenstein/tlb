@@ -10,7 +10,7 @@ use kube::{
 use log::{error, info};
 use serde_json::json;
 use tlb::{
-    Error, FOR_TUNNEL_CLASS_LABEL, Result, TunnelProvider,
+    Error, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL, Result, TunnelProvider,
     crds::{ClusterTunnelClass, TunnelClass, TunnelClassInnerSpec},
     simpleevent::SimpleEventRecorder,
 };
@@ -20,7 +20,6 @@ use tlb::ReconcileContext;
 const TUNNELCLASS_FINALIZER_NAME: &str = "tlb.io/finalizer";
 const SERVICE_FINALIZER_NAME: &str = "tlb.io/tunnel-cleanup";
 const LAST_OBSERVED_STATE_ANNOTATION: &str = "controller.tlb.io/last-observed-state";
-const LAST_OBSERVED_PROVIDER_ANNOTATION: &str = "controller.tlb.io/last-observed-provider";
 
 /// Returns all deployments that were created by this tunnel class.
 async fn get_deployments(ctx: &ReconcileContext) -> Result<Vec<Deployment>> {
@@ -404,10 +403,10 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         .metadata
         .annotations
         .as_ref()
-        .and_then(|annotations| annotations.get(LAST_OBSERVED_PROVIDER_ANNOTATION))
+        .and_then(|annotations| annotations.get(PROVIDER_LABEL))
         .and_then(|s| match s.as_str() {
-            "Cloudflare" => Some(tlb::ProviderType::Cloudflare),
-            "Netbird" => Some(tlb::ProviderType::Netbird),
+            "cloudflare" => Some(tlb::ProviderType::Cloudflare),
+            "netbird" => Some(tlb::ProviderType::Netbird),
             _ => None,
         });
 
@@ -439,8 +438,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     // Update the last observed provider annotation
     if let Some(current_provider) = current_provider_type {
         let provider_str = match current_provider {
-            tlb::ProviderType::Cloudflare => "Cloudflare",
-            tlb::ProviderType::Netbird => "Netbird",
+            tlb::ProviderType::Cloudflare => "cloudflare",
+            tlb::ProviderType::Netbird => "netbird",
         };
 
         tunnel_class_api
@@ -450,7 +449,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 &Patch::Merge(json!({
                     "metadata": {
                         "annotations": {
-                            LAST_OBSERVED_PROVIDER_ANNOTATION: provider_str
+                            PROVIDER_LABEL: provider_str
                         }
                     }
                 })),
