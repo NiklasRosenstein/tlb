@@ -118,6 +118,8 @@ fn get_provider_type(tunnel_class_spec: &TunnelClassInnerSpec) -> Option<tlb::Pr
         Some(tlb::ProviderType::Cloudflare)
     } else if tunnel_class_spec.netbird.is_some() {
         Some(tlb::ProviderType::Netbird)
+    } else if tunnel_class_spec.pangolin.is_some() {
+        Some(tlb::ProviderType::Pangolin)
     } else {
         None
     }
@@ -139,6 +141,9 @@ async fn lookup_tunnel_class_provider(
         if let Some(netbird_config) = &spec.netbird {
             return Ok(Some(Box::new(netbird_config.clone())));
         }
+        if let Some(pangolin_config) = &spec.pangolin {
+            return Ok(Some(Box::new(pangolin_config.clone())));
+        }
     }
 
     // If not found, try cluster-scoped tunnel class
@@ -150,6 +155,9 @@ async fn lookup_tunnel_class_provider(
         }
         if let Some(netbird_config) = &spec.netbird {
             return Ok(Some(Box::new(netbird_config.clone())));
+        }
+        if let Some(pangolin_config) = &spec.pangolin {
+            return Ok(Some(Box::new(pangolin_config.clone())));
         }
     }
 
@@ -407,6 +415,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         .and_then(|s| match s.as_str() {
             "cloudflare" => Some(tlb::ProviderType::Cloudflare),
             "netbird" => Some(tlb::ProviderType::Netbird),
+            "pangolin" => Some(tlb::ProviderType::Pangolin),
             _ => None,
         });
 
@@ -440,6 +449,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         let provider_str = match current_provider {
             tlb::ProviderType::Cloudflare => "cloudflare",
             tlb::ProviderType::Netbird => "netbird",
+            tlb::ProviderType::Pangolin => "pangolin",
         };
 
         tunnel_class_api
@@ -532,6 +542,10 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
         tunnel_class
             .cloudflare
+            .as_ref()
+            .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
+        tunnel_class
+            .pangolin
             .as_ref()
             .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
     ]
