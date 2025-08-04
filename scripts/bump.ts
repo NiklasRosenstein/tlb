@@ -53,3 +53,9 @@ if (!ok) {
   );
   Deno.exit(1);
 }
+
+await new Deno.Command("cargo", { args: ["update"] }).spawn().output();
+await new Deno.Command("git", { args: ["add", ...BUMPS.map((b) => b.file), "Cargo.lock"] }).spawn().output();
+await new Deno.Command("git", { args: ["tag", `v${version}`] }).spawn().output();
+await new Deno.Command("git", { args: ["commit", "-m", `Release ${version}`] }).spawn().output();
+console.log(`Version bumped to ${version} and changes committed.`);
