@@ -5,7 +5,7 @@ metadata:
   name: cloudflare
 spec:
   cloudflare:
-    accountId: your_account_id
+    accountId: b960d3e903036d4cd5350a4ebf815c4d
     apiTokenRef:
       name: cloudflare-api-key
       namespace: default
@@ -18,13 +18,16 @@ metadata:
   name: cloudflare-api-key
 type: Opaque
 stringData:
-  token: your_api_key_here
+  token: Sq2z0C-4vIEG70H_MMgOtoBG5MkhxZRxYpL4fv9r
 
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: nginx-hello-world
+  annotations:
+    tlb.io/dns: hello.432372253.xyz
+    tlb.io/protocol: "http"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/cloudflare

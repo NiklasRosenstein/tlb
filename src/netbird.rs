@@ -145,8 +145,8 @@ fn get_netbird_launch_script(
 
 #[async_trait]
 impl TunnelProvider for NetbirdConfig {
-    fn name(&self) -> &'static str {
-        "netbird"
+    fn provider_type(&self) -> crate::ProviderType {
+        crate::ProviderType::Netbird
     }
 
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
@@ -162,14 +162,18 @@ impl TunnelProvider for NetbirdConfig {
         let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
 
         let svc_name = service.metadata.name.as_ref().ok_or(Error::UnexpectedError(format!(
-            "Service does not have a name: {service:?}"
+            "Service does not have a name: {service:?} (in netbird::reconcile_service at {}:{})",
+            file!(),
+            line!()
         )))?;
         let svc_namespace = service
             .metadata
             .namespace
             .as_ref()
             .ok_or(Error::UnexpectedError(format!(
-                "Service `{svc_name}` does not have a namespace"
+                "Service `{svc_name}` does not have a namespace (in netbird::reconcile_service at {}:{})",
+                file!(),
+                line!()
             )))?;
         let cluster_ip = match service.spec.as_ref().and_then(|s| s.cluster_ip.clone()) {
             Some(ip) => ip,
@@ -551,17 +555,44 @@ impl TunnelProvider for NetbirdConfig {
     async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
         let svc_name = service.name_any();
         let svc_namespace = service.namespace().unwrap();
+        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
 
-        let resource_name = format!(
-            "{}{}",
-            self.resource_prefix.clone().unwrap_or_else(|| "tunnel-".to_string()),
-            svc_name
+        // Use label selectors to find resources instead of hardcoded names
+        // This ensures cleanup works even if resource_prefix changes
+        let label_selector = format!(
+            "{}={},{}={},{}={}",
+            crate::FOR_SERVICE_LABEL,
+            svc_name,
+            crate::FOR_TUNNEL_CLASS_LABEL,
+            tunnel_class_name,
+            crate::PROVIDER_LABEL,
+            "netbird"
         );
 
+        // Clean up StatefulSets
         let statefulset_api = Api::<StatefulSet>::namespaced(ctx.client.clone(), &svc_namespace);
-        if statefulset_api.get_opt(&resource_name).await?.is_some() {
-            info!("Deleting netbird statefulset `{resource_name}` for service `{svc_name}`");
-            statefulset_api.delete(&resource_name, &Default::default()).await?;
+        let statefulsets = statefulset_api
+            .list(&kube::api::ListParams::default().labels(&label_selector))
+            .await
+            .map_err(|e| {
+                Error::UnexpectedError(format!(
+                    "Failed to list StatefulSets for service '{}' in namespace '{}': {}",
+                    svc_name, svc_namespace, e
+                ))
+            })?;
+
+        for statefulset in statefulsets {
+            let statefulset_name = statefulset.metadata.name.as_ref().unwrap();
+            info!("Deleting netbird statefulset `{statefulset_name}` for service `{svc_name}` using label selector");
+            statefulset_api
+                .delete(statefulset_name, &Default::default())
+                .await
+                .map_err(|e| {
+                    Error::UnexpectedError(format!(
+                        "Failed to delete StatefulSet '{}' for service '{}': {}",
+                        statefulset_name, svc_name, e
+                    ))
+                })?;
         }
 
         Ok(())

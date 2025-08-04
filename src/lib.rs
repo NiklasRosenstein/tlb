@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
+use anyhow::Context;
 use async_trait::async_trait;
-use k8s_openapi::api::core::v1::Service;
-use kube::{Client, runtime::controller::Action};
+use k8s_openapi::api::core::v1::{Secret, Service};
+use kube::{Api, Client, runtime::controller::Action};
 
 use crate::simpleevent::SimpleEventRecorder;
 
@@ -23,11 +24,37 @@ pub struct ReconcileContext {
     pub namespaced: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderType {
+    Cloudflare,
+    Netbird,
+}
+
+impl ProviderType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderType::Cloudflare => "cloudflare",
+            ProviderType::Netbird => "netbird",
+        }
+    }
+}
+
+impl std::fmt::Display for ProviderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 #[async_trait]
 pub trait TunnelProvider {
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
     async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
-    fn name(&self) -> &'static str;
+    fn provider_type(&self) -> ProviderType;
+
+    /// Legacy method for backward compatibility - delegates to provider_type()
+    fn name(&self) -> &'static str {
+        self.provider_type().as_str()
+    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -103,4 +130,40 @@ impl From<BTreeMap<String, String>> for ServiceAnnotations {
             node_selector,
         }
     }
+}
+
+/// Fetches a secret from the Kubernetes API. This is a shared function used by multiple providers.
+pub async fn get_secret(
+    client: &Client,
+    secret_ref: &crate::crds::SeretKeyRef,
+    fallback_ns: &str,
+) -> anyhow::Result<Secret> {
+    let ns = secret_ref.namespace.as_deref().unwrap_or(fallback_ns);
+    let secret_api: Api<Secret> = Api::namespaced(client.clone(), ns);
+    secret_api.get(&secret_ref.name).await.context(format!(
+        "Failed to get secret '{}' in namespace '{}'",
+        secret_ref.name, ns
+    ))
+}
+
+/// Fetches a secret value from the Kubernetes API. This is a shared function used by multiple providers.
+/// Returns the decoded string value from the specified key in the secret.
+pub async fn get_secret_value(
+    client: &Client,
+    secret_ref: &crate::crds::SeretKeyRef,
+    fallback_ns: &str,
+) -> anyhow::Result<String> {
+    let secret = get_secret(client, secret_ref, fallback_ns).await?;
+
+    let data = secret
+        .data
+        .ok_or_else(|| anyhow::anyhow!("Secret '{}' has no data", secret_ref.name))?;
+    let value_bytes = data
+        .get(&secret_ref.key)
+        .ok_or_else(|| anyhow::anyhow!("Secret '{}' does not contain key '{}'", secret_ref.name, secret_ref.key))?;
+
+    String::from_utf8(value_bytes.0.clone()).context(format!(
+        "Secret '{}' key '{}' contains invalid UTF-8",
+        secret_ref.name, secret_ref.key
+    ))
 }

@@ -1,24 +1,26 @@
-use std::collections::HashSet;
-
 use k8s_openapi::api::{
     apps::v1::{Deployment, StatefulSet},
     core::v1::{Namespace, Secret, Service},
 };
 use kube::{
+    Resource,
     api::{Api, ApiResource, DynamicObject, GroupVersionKind, ListParams, Patch, PatchParams},
     runtime::controller::Action,
 };
-use log::info;
+use log::{error, info};
 use serde_json::json;
 use tlb::{
-    Error, FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, Result, TunnelProvider,
+    Error, FOR_TUNNEL_CLASS_LABEL, Result, TunnelProvider,
     crds::{ClusterTunnelClass, TunnelClass, TunnelClassInnerSpec},
     simpleevent::SimpleEventRecorder,
 };
 
 use tlb::ReconcileContext;
 
-const FINALIZER_NAME: &str = "tlb.io/finalizer";
+const TUNNELCLASS_FINALIZER_NAME: &str = "tlb.io/finalizer";
+const SERVICE_FINALIZER_NAME: &str = "tlb.io/tunnel-cleanup";
+const LAST_OBSERVED_STATE_ANNOTATION: &str = "controller.tlb.io/last-observed-state";
+const LAST_OBSERVED_PROVIDER_ANNOTATION: &str = "controller.tlb.io/last-observed-provider";
 
 /// Returns all deployments that were created by this tunnel class.
 async fn get_deployments(ctx: &ReconcileContext) -> Result<Vec<Deployment>> {
@@ -46,6 +48,252 @@ async fn get_statefulsets(ctx: &ReconcileContext) -> Result<Vec<StatefulSet>> {
         .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
         .await?;
     Ok(statefulsets.items)
+}
+
+/// Gets the current load balancer class for a service (if it's a tunnel provider)
+fn get_current_tunnel_state(service: &Service) -> Option<String> {
+    service
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.load_balancer_class.as_ref())
+        .filter(|lbc| lbc.starts_with("tlb.io/"))
+        .cloned()
+}
+
+/// Gets the last observed state from the service annotation
+fn get_last_observed_state(service: &Service) -> Option<String> {
+    service
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(LAST_OBSERVED_STATE_ANNOTATION))
+        .cloned()
+}
+
+/// Updates the last observed state annotation on a service
+async fn update_service_state_annotation(
+    ctx: &ReconcileContext,
+    service: &Service,
+    new_state: Option<&str>,
+) -> Result<()> {
+    let service_name = service.metadata.name.as_ref().unwrap();
+    let service_namespace = service.metadata.namespace.as_ref().unwrap();
+    let service_api = Api::<Service>::namespaced(ctx.client.clone(), service_namespace);
+
+    let patch = if let Some(state) = new_state {
+        json!({
+            "metadata": {
+                "annotations": {
+                    LAST_OBSERVED_STATE_ANNOTATION: state
+                }
+            }
+        })
+    } else {
+        // Remove the annotation by setting it to null
+        json!({
+            "metadata": {
+                "annotations": {
+                    LAST_OBSERVED_STATE_ANNOTATION: null
+                }
+            }
+        })
+    };
+
+    service_api
+        .patch(service_name, &PatchParams::default(), &Patch::Merge(patch))
+        .await?;
+
+    if let Some(state) = new_state {
+        info!("Updated last observed state for service `{service_name}` to `{state}`");
+    } else {
+        info!("Removed last observed state annotation from service `{service_name}`");
+    }
+
+    Ok(())
+}
+
+/// Gets the provider type for a given tunnel class spec
+fn get_provider_type(tunnel_class_spec: &TunnelClassInnerSpec) -> Option<tlb::ProviderType> {
+    // Determine which provider is configured for this tunnel class
+    if tunnel_class_spec.cloudflare.is_some() {
+        Some(tlb::ProviderType::Cloudflare)
+    } else if tunnel_class_spec.netbird.is_some() {
+        Some(tlb::ProviderType::Netbird)
+    } else {
+        None
+    }
+}
+
+/// Looks up a tunnel class by name and returns its provider instance
+async fn lookup_tunnel_class_provider(
+    ctx: &ReconcileContext,
+    tunnel_class_name: &str,
+    service_namespace: &str,
+) -> Result<Option<Box<dyn TunnelProvider>>> {
+    // First try to find a namespaced tunnel class in the service's namespace
+    let tunnel_class_api = Api::<TunnelClass>::namespaced(ctx.client.clone(), service_namespace);
+    if let Ok(tunnel_class) = tunnel_class_api.get(tunnel_class_name).await {
+        let spec = &tunnel_class.spec.inner;
+        if let Some(cloudflare_config) = &spec.cloudflare {
+            return Ok(Some(Box::new(cloudflare_config.clone())));
+        }
+        if let Some(netbird_config) = &spec.netbird {
+            return Ok(Some(Box::new(netbird_config.clone())));
+        }
+    }
+
+    // If not found, try cluster-scoped tunnel class
+    let cluster_tunnel_class_api = Api::<ClusterTunnelClass>::all(ctx.client.clone());
+    if let Ok(cluster_tunnel_class) = cluster_tunnel_class_api.get(tunnel_class_name).await {
+        let spec = &cluster_tunnel_class.spec.inner;
+        if let Some(cloudflare_config) = &spec.cloudflare {
+            return Ok(Some(Box::new(cloudflare_config.clone())));
+        }
+        if let Some(netbird_config) = &spec.netbird {
+            return Ok(Some(Box::new(netbird_config.clone())));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Handles Service finalizer logic and cleanup when a Service is being deleted
+async fn handle_service_finalizer(ctx: &ReconcileContext, service: &Service) -> Result<bool> {
+    let service_name = service.metadata.name.as_ref().unwrap();
+    let service_namespace = service.metadata.namespace.as_ref().unwrap();
+    let service_api = Api::<Service>::namespaced(ctx.client.clone(), service_namespace);
+
+    // Check if the service is being deleted
+    if service.metadata.deletion_timestamp.is_some() {
+        info!("Service `{service_name}` in namespace `{service_namespace}` is being deleted, performing cleanup");
+
+        // Get the tunnel class that was used for this service
+        let current_state = get_current_tunnel_state(service);
+        let last_observed_state = get_last_observed_state(service);
+
+        // Use current state if available, otherwise fall back to last observed state
+        let tunnel_class_state = current_state.or(last_observed_state);
+
+        let mut cleanup_errors = Vec::new();
+
+        if let Some(state) = tunnel_class_state {
+            if let Some(tunnel_class_name) = state.strip_prefix("tlb.io/") {
+                // Look up the tunnel class to get its provider configuration
+                if let Some(provider) = lookup_tunnel_class_provider(ctx, tunnel_class_name, service_namespace).await? {
+                    info!(
+                        "Cleaning up service `{service_name}` with provider: {}",
+                        provider.provider_type()
+                    );
+                    if let Err(e) = provider.cleanup_service(ctx, service).await {
+                        error!(
+                            "Provider '{}' cleanup failed for service '{}': {}",
+                            provider.name(),
+                            service_name,
+                            e
+                        );
+                        cleanup_errors.push(format!("provider '{}': {}", provider.name(), e));
+                    }
+                } else {
+                    error!(
+                        "Could not find tunnel class '{}' for service '{}' during cleanup",
+                        tunnel_class_name, service_name
+                    );
+                    cleanup_errors.push(format!("tunnel class '{}' not found", tunnel_class_name));
+                }
+            } else {
+                error!(
+                    "Invalid tunnel class state '{}' for service '{}' during cleanup",
+                    state, service_name
+                );
+                cleanup_errors.push(format!("invalid tunnel class state '{}'", state));
+            }
+        } else {
+            // No tunnel class information available - this shouldn't happen if our finalizer logic is correct
+            // but we'll handle it gracefully by trying to remove the finalizer anyway
+            error!(
+                "No tunnel class state found for service '{}' during cleanup - removing finalizer anyway",
+                service_name
+            );
+        }
+
+        // Only remove finalizer if ALL cleanup operations succeeded
+        if cleanup_errors.is_empty() {
+            // Remove our finalizer
+            let current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
+            let updated_finalizers: Vec<String> = current_finalizers
+                .into_iter()
+                .filter(|f| f != SERVICE_FINALIZER_NAME)
+                .collect();
+
+            service_api
+                .patch(
+                    service_name,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
+                        "metadata": {
+                            "finalizers": updated_finalizers
+                        }
+                    })),
+                )
+                .await?;
+
+            info!(
+                "Removed finalizer from service `{service_name}` in namespace `{service_namespace}` - cleanup operations succeeded"
+            );
+        } else {
+            // Create an event about the cleanup failures
+            let event_msg = format!(
+                "Cannot remove finalizer from service `{service_name}`: cleanup failed ({})",
+                cleanup_errors.join(", ")
+            );
+            ctx.events
+                .publish(
+                    &service.object_ref(&()),
+                    kube::runtime::events::EventType::Warning,
+                    "CleanupFailed".into(),
+                    Some(event_msg.clone()),
+                    "Cleanup".into(),
+                )
+                .await?;
+
+            error!(
+                "Cleanup failed for service `{service_name}`, keeping finalizer in place: {}",
+                cleanup_errors.join(", ")
+            );
+            // Don't return an error here - we want the controller to retry later
+        }
+
+        return Ok(true); // Service is being deleted, skip further processing
+    }
+
+    // Add finalizer if it's not present
+    let has_finalizer = service
+        .metadata
+        .finalizers
+        .as_ref()
+        .map(|f| f.contains(&SERVICE_FINALIZER_NAME.to_string()))
+        .unwrap_or(false);
+
+    if !has_finalizer {
+        let mut current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
+        current_finalizers.push(SERVICE_FINALIZER_NAME.to_string());
+
+        service_api
+            .patch(
+                service_name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({
+                    "metadata": {
+                        "finalizers": current_finalizers
+                    }
+                })),
+            )
+            .await?;
+
+        info!("Added finalizer to service `{service_name}` in namespace `{service_namespace}`");
+    }
+
+    Ok(false) // Service is not being deleted, continue processing
 }
 
 async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) -> Result<Action> {
@@ -135,7 +383,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         .metadata
         .finalizers
         .as_ref()
-        .is_some_and(|f| f.contains(&FINALIZER_NAME.to_string()))
+        .is_some_and(|f| f.contains(&TUNNELCLASS_FINALIZER_NAME.to_string()))
     {
         tunnel_class_api
             .patch(
@@ -143,7 +391,67 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 &PatchParams::default(),
                 &Patch::Merge(json!({
                     "metadata": {
-                        "finalizers": [FINALIZER_NAME]
+                        "finalizers": [TUNNELCLASS_FINALIZER_NAME]
+                    }
+                })),
+            )
+            .await?;
+    }
+
+    // Check for provider transitions and emit warning events
+    let current_provider_type = get_provider_type(tunnel_class);
+    let last_observed_provider = ctx
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(LAST_OBSERVED_PROVIDER_ANNOTATION))
+        .and_then(|s| match s.as_str() {
+            "Cloudflare" => Some(tlb::ProviderType::Cloudflare),
+            "Netbird" => Some(tlb::ProviderType::Netbird),
+            _ => None,
+        });
+
+    if let (Some(current), Some(last)) = (current_provider_type, last_observed_provider) {
+        if current != last {
+            // Provider transition detected - emit warning event
+            // Create a dummy object to get the object reference
+            let dummy_object = if ctx.namespaced {
+                DynamicObject::new(tunnel_class_name, &api_resource).within(ctx.metadata.namespace.as_ref().unwrap())
+            } else {
+                DynamicObject::new(tunnel_class_name, &api_resource)
+            };
+
+            ctx.events
+                .publish(
+                    &dummy_object.object_ref(&api_resource),
+                    kube::runtime::events::EventType::Warning,
+                    "ProviderTransitionNotSupported".into(),
+                    Some(format!(
+                        "Provider transition from {} to {} is not supported. Resources from the previous provider may not be cleaned up automatically. Consider deleting and recreating the tunnel class instead.",
+                        last, current
+                    )),
+                    "Reconcile".into(),
+                )
+                .await?;
+        }
+    }
+
+    // Update the last observed provider annotation
+    if let Some(current_provider) = current_provider_type {
+        let provider_str = match current_provider {
+            tlb::ProviderType::Cloudflare => "Cloudflare",
+            tlb::ProviderType::Netbird => "Netbird",
+        };
+
+        tunnel_class_api
+            .patch(
+                tunnel_class_name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({
+                    "metadata": {
+                        "annotations": {
+                            LAST_OBSERVED_PROVIDER_ANNOTATION: provider_str
+                        }
                     }
                 })),
             )
@@ -218,57 +526,6 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .join(", ")
     );
 
-    // Clean up orphaned deployments.
-    let services_with_lb_class: HashSet<String> = services.iter().map(|s| s.metadata.name.clone().unwrap()).collect();
-
-    for ns in &namespaces {
-        let deployment_api = Api::<Deployment>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
-        let deployments = deployment_api
-            .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
-            .await?;
-
-        for deployment in deployments {
-            let deployment_name = deployment.metadata.name.as_ref().unwrap();
-            let service_name_label = deployment
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get(FOR_SERVICE_LABEL));
-
-            if let Some(service_name) = service_name_label {
-                if !services_with_lb_class.contains(service_name) {
-                    info!("Deleting orphaned deployment `{deployment_name}` for service `{service_name}`");
-                    deployment_api.delete(deployment_name, &Default::default()).await?;
-                }
-            }
-        }
-    }
-
-    // Clean up orphaned secrets.
-    for ns in &namespaces {
-        let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), ns.metadata.name.as_ref().unwrap());
-        let secrets = secret_api
-            .list(&ListParams::default().labels(&format!("{FOR_TUNNEL_CLASS_LABEL}={tunnel_class_name}")))
-            .await?;
-
-        for secret in secrets {
-            let secret_name = secret.metadata.name.as_ref().unwrap();
-            let service_name_label = secret.metadata.labels.as_ref().and_then(|l| l.get(FOR_SERVICE_LABEL));
-
-            if let Some(service_name) = service_name_label {
-                if !services_with_lb_class.contains(service_name) {
-                    info!("Deleting orphaned secret `{secret_name}` for service `{service_name}`");
-                    secret_api.delete(secret_name, &Default::default()).await?;
-                }
-            }
-        }
-    }
-
-    let all_providers: Vec<Box<dyn TunnelProvider>> = vec![
-        Box::new(tlb::crds::NetbirdConfig::default()),
-        Box::new(tlb::crds::CloudflareConfig::default()),
-    ];
-
     let active_providers: Vec<Box<dyn TunnelProvider>> = vec![
         tunnel_class
             .netbird
@@ -285,16 +542,122 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
 
     // Process each individual service.
     for service in services {
-        // Cleanup resources from providers that are no longer configured.
-        for provider_to_cleanup in all_providers.iter() {
-            if !active_providers.iter().any(|p| p.name() == provider_to_cleanup.name()) {
-                provider_to_cleanup.cleanup_service(ctx, &service).await?;
-            }
+        // Handle Service finalizer logic and check if service is being deleted
+        let service_being_deleted = handle_service_finalizer(ctx, &service).await?;
+
+        // Skip further processing if service is being deleted
+        if service_being_deleted {
+            continue;
         }
 
-        // Reconcile for the current providers.
-        for provider in active_providers.iter() {
-            provider.reconcile_service(ctx, &service).await?;
+        // Get current and last observed states
+        let current_state = get_current_tunnel_state(&service);
+        let last_observed_state = get_last_observed_state(&service);
+
+        // Handle state transitions
+        if last_observed_state.as_deref() != current_state.as_deref() {
+            info!(
+                "State transition detected for service `{}`: {:?} -> {:?}",
+                service.metadata.name.as_ref().unwrap(),
+                last_observed_state,
+                current_state
+            );
+
+            // Handle loadBalancerClass transitions - cleanup with old provider if we can find it
+            if let Some(old_state) = &last_observed_state {
+                if let Some(old_tunnel_class_name) = old_state.strip_prefix("tlb.io/") {
+                    // Look up the old tunnel class to get its provider configuration
+                    let service_namespace = service.metadata.namespace.as_ref().unwrap();
+                    if let Some(old_provider) =
+                        lookup_tunnel_class_provider(ctx, old_tunnel_class_name, service_namespace).await?
+                    {
+                        info!(
+                            "Cleaning up service `{}` with old provider: {}",
+                            service.metadata.name.as_ref().unwrap(),
+                            old_provider.provider_type()
+                        );
+                        old_provider.cleanup_service(ctx, &service).await?;
+                    }
+                }
+            }
+
+            // Update state annotation
+            update_service_state_annotation(ctx, &service, current_state.as_deref()).await?;
+        }
+
+        // Reconcile with current providers (if any)
+        if !active_providers.is_empty() {
+            // Add Service finalizer if we're managing this service
+            let has_finalizer = service
+                .metadata
+                .finalizers
+                .as_ref()
+                .map(|f| f.contains(&SERVICE_FINALIZER_NAME.to_string()))
+                .unwrap_or(false);
+
+            if !has_finalizer {
+                let service_name = service.metadata.name.as_ref().unwrap();
+                let service_namespace = service.metadata.namespace.as_ref().unwrap();
+                let service_api = Api::<Service>::namespaced(ctx.client.clone(), service_namespace);
+
+                let mut current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
+                current_finalizers.push(SERVICE_FINALIZER_NAME.to_string());
+
+                service_api
+                    .patch(
+                        service_name,
+                        &PatchParams::default(),
+                        &Patch::Merge(json!({
+                            "metadata": {
+                                "finalizers": current_finalizers
+                            }
+                        })),
+                    )
+                    .await?;
+
+                info!("Added finalizer to service `{service_name}` in namespace `{service_namespace}`");
+            }
+
+            // Reconcile for the current providers
+            for provider in active_providers.iter() {
+                provider.reconcile_service(ctx, &service).await?;
+            }
+        } else {
+            // No tunnel provider - remove finalizer if present
+            let has_finalizer = service
+                .metadata
+                .finalizers
+                .as_ref()
+                .map(|f| f.contains(&SERVICE_FINALIZER_NAME.to_string()))
+                .unwrap_or(false);
+
+            if has_finalizer {
+                let service_name = service.metadata.name.as_ref().unwrap();
+                let service_namespace = service.metadata.namespace.as_ref().unwrap();
+                let service_api = Api::<Service>::namespaced(ctx.client.clone(), service_namespace);
+
+                let current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
+                let updated_finalizers: Vec<String> = current_finalizers
+                    .into_iter()
+                    .filter(|f| f != SERVICE_FINALIZER_NAME)
+                    .collect();
+
+                service_api
+                    .patch(
+                        service_name,
+                        &PatchParams::default(),
+                        &Patch::Merge(json!({
+                            "metadata": {
+                                "finalizers": updated_finalizers
+                            }
+                        })),
+                    )
+                    .await?;
+
+                info!(
+                    "Removed finalizer from service `{service_name}` in namespace `{service_namespace}` (no tunnel provider)"
+                );
+            }
         }
     }
 
@@ -345,10 +708,24 @@ pub async fn run(reconcile_interval: std::time::Duration) {
                 namespaced: tunnel_class.2,
             };
             reconcile(&tunnel_class.0, &ctx).await.unwrap_or_else(|e| {
-                info!(
-                    "Failed to reconcile TunnelClass {}: {}",
-                    tunnel_class.1.name.unwrap(),
-                    e
+                let tunnel_class_name = tunnel_class.1.name.as_deref().unwrap_or("<unknown>");
+                let namespace = if tunnel_class.2 {
+                    tunnel_class
+                        .1
+                        .namespace
+                        .as_ref()
+                        .map(|ns| format!(" in namespace '{}'", ns))
+                        .unwrap_or_default()
+                } else {
+                    " (cluster-scoped)".to_string()
+                };
+                log::error!(
+                    "Failed to reconcile TunnelClass '{}'{}: {} (in controller::reconcile at {}:{})",
+                    tunnel_class_name,
+                    namespace,
+                    e,
+                    file!(),
+                    line!()
                 );
                 Action::requeue(reconcile_interval)
             });
