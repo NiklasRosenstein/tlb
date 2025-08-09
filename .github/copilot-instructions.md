@@ -192,3 +192,6 @@ The project uses GitHub Actions with specific requirements:
 - Timeout set to 10 minutes for CI
 - mise for task orchestration in CI environment
 - Docker builds with multi-stage builds using Alpine/musl
+
+## File Version
+This file was last updated on 2025-08-09 and contains comprehensive instructions for working with the TLB repository.
