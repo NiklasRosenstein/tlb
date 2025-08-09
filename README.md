@@ -60,13 +60,15 @@ spec:
 
 Configure your tunnels using these Service annotations:
 
-| Annotation             | Description                              | Cloudflare             | NetBird                      | Example                                  |
-| ---------------------- | ---------------------------------------- | ---------------------- | ---------------------------- | ---------------------------------------- |
-| `tlb.io/dns`           | Comma-separated DNS names for the tunnel | ✅ Auto CNAME creation | ✅ Sets load balancer status | `"app.example.com,api.example.com"`      |
-| `tlb.io/protocol`      | Protocol mapping for traffic forwarding  | ✅ Per-port or global  | ❌ Not used                  | `"80:http,22:ssh,3389:rdp"` or `"https"` |
-| `tlb.io/replicas`      | Number of tunnel replicas for HA         | ✅ Supported           | ✅ Supported                 | `"3"`                                    |
-| `tlb.io/topology-key`  | Topology key for spreading replicas      | ✅ Supported           | ✅ Supported                 | `"topology.kubernetes.io/zone"`          |
-| `tlb.io/node-selector` | Node labels for tunnel placement         | ✅ Supported           | ✅ Supported                 | `"zone=us-west,type=worker"`             |
+| Annotation               | Description                              | Cloudflare             | NetBird                      | Example                                  |
+| ------------------------ | ---------------------------------------- | ---------------------- | ---------------------------- | ---------------------------------------- |
+| `tlb.io/dns`             | Comma-separated DNS names for the tunnel | ✅ Auto CNAME creation | ✅ Sets load balancer status | `"app.example.com,api.example.com"`      |
+| `tlb.io/protocol`        | Protocol mapping for traffic forwarding  | ✅ Per-port or global  | ❌ Not used                  | `"80:http,22:ssh,3389:rdp"` or `"https"` |
+| `tlb.io/replicas`        | Number of tunnel replicas for HA         | ✅ Supported           | ✅ Supported                 | `"3"`                                    |
+| `tlb.io/topology-key`    | Topology key for spreading replicas      | ✅ Supported           | ✅ Supported                 | `"topology.kubernetes.io/zone"`          |
+| `tlb.io/node-selector`   | Node labels for tunnel placement         | ✅ Supported           | ✅ Supported                 | `"zone=us-west,type=worker"`             |
+| `tlb.io/tls-secret-name` | TLS certificate secret for termination   | ❌ Not supported       | ✅ Supported                 | `"my-tls-secret"`                        |
+| `tlb.io/tls-port`        | Port for TLS termination                 | ❌ Not supported       | ✅ Supported                 | `"443"`                                  |
 
 ### Annotation Details
 
@@ -103,6 +105,82 @@ Configure your tunnels using these Service annotations:
 - **Purpose**: Restricts tunnel pods to specific nodes
 - **Format**: Comma-separated key=value pairs
 - **Example**: `"disktype=ssd,zone=us-west-1"`
+
+#### `tlb.io/tls-secret-name` (NetBird only)
+
+- **Purpose**: Enables TLS termination using certificates from a Kubernetes secret
+- **Format**: Name of a `kubernetes.io/tls` type secret containing `tls.crt` and `tls.key`
+- **Behavior**: When specified, socat is configured with `openssl-listen` for TLS termination
+- **Example**: `"my-tls-secret"`
+
+#### `tlb.io/tls-port` (NetBird only)
+
+- **Purpose**: Specifies which port should have TLS termination applied
+- **Format**: Port number as string
+- **Default behavior** when `tlb.io/tls-secret-name` is set but `tlb.io/tls-port` is not:
+  - If service has port 443: TLS termination on port 443
+  - If service has port 80 but not 443: TLS termination on port 443, forwarding to port 80
+  - Otherwise: Error event logged, explicit `tlb.io/tls-port` required
+- **Example**: `"443"`
+
+## 🔒 TLS Termination (NetBird)
+
+NetBird provider supports TLS termination using socat with certificates stored in Kubernetes secrets. This allows you to:
+
+- Terminate TLS at the tunnel edge using your own certificates
+- Forward decrypted traffic to HTTP services
+- Support HTTPS services with certificate management in Kubernetes
+
+### TLS Termination Example
+
+```yaml
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-tls-secret
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTi... # Base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTi... # Base64 encoded private key
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  annotations:
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: my-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app: my-app
+```
+
+### How TLS Termination Works
+
+1. **Secret Mounting**: The TLS secret is mounted at `/tls/` in the NetBird pod
+2. **socat Configuration**: Traffic is handled with `openssl-listen` for TLS ports
+3. **Certificate Files**: `tls.crt` and `tls.key` from the secret are used for TLS termination
+4. **Traffic Flow**: `HTTPS Client → TLS Termination → HTTP/HTTPS Backend`
+
+### Port Selection Logic
+
+- **Explicit port**: Use `tlb.io/tls-port` annotation value
+- **Port 443 available**: Automatically use port 443 for TLS termination  
+- **Only port 80 available**: Listen on 443, terminate TLS, forward to port 80
+- **Other ports**: Must specify `tlb.io/tls-port` explicitly or an error event is logged
 
 ## 💡 Examples
 
@@ -209,6 +287,31 @@ spec:
       targetPort: 8080
   selector:
     app: internal-app
+```
+
+#### TLS Termination with NetBird
+
+Expose an HTTP service with TLS termination:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: secure-app
+  annotations:
+    tlb.io/dns: "secure.netbird.local"
+    tlb.io/tls-secret-name: "my-tls-cert"
+    tlb.io/replicas: "2"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: http
+  selector:
+    app: secure-app
+# This will create TLS termination on port 443 forwarding to HTTP port 80
 ```
 
 ## ⚠️ Important Limitations

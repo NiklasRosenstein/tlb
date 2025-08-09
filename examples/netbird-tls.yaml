@@ -1,0 +1,169 @@
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: netbird
+spec:
+  netbird:
+    managementUrl: https://netbird.example.com
+    setupKeyRef:
+      name: netbird-setup-key
+      namespace: default
+      key: setupKey
+    storageClass: standard
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: netbird-setup-key
+type: Opaque
+stringData:
+  setupKey: 76A5AE81-1E3D-4207-9939-82EC1A97BF0F
+
+---
+# TLS certificate secret for termination
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-tls-secret
+type: kubernetes.io/tls
+data:
+  # Base64 encoded certificate and private key
+  # For testing purposes - in production, use real certificates
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+
+---
+# Example 1: TLS termination on 443 with explicit port annotation
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  annotations:
+    tlb.io/tls-secret-name: my-tls-secret
+    tlb.io/tls-port: "443"
+    external-dns.alpha.kubernetes.io/hostname: my-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app: my-app
+
+---
+# Example 2: TLS termination on 443 forwarding to HTTP port 80 (no explicit tls-port)
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-service-with-tls
+  annotations:
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: http-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: http-app
+
+---
+# Example 3: Service with 443 port - TLS termination happens on 443 (no explicit tls-port needed)
+apiVersion: v1
+kind: Service
+metadata:
+  name: https-service
+  annotations:
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: https-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 443
+      targetPort: 8443
+      protocol: TCP
+      name: https
+  selector:
+    app: https-app
+
+---
+# Deployment for the examples
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-app
+  template:
+    metadata:
+      labels:
+        app: http-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: http
+              containerPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: https-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: https-app
+  template:
+    metadata:
+      labels:
+        app: https-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: https
+              containerPort: 8443

@@ -869,3 +869,98 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
     eprintln!("[peer-ip-server] Found {} Netbird peer IPs", peer_ips.len());
     Ok(peer_ips)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::ServicePort;
+
+    #[test]
+    fn test_tls_socat_command_generation() {
+        let ports = vec![
+            ServicePort {
+                name: Some("https".to_string()),
+                port: 443,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let script = get_netbird_launch_script(
+            NetbirdForwardingMode::Socat,
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            Some(&"my-tls-secret".to_string()),
+            Some(443),
+        );
+
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("cert=/tls/tls.crt"));
+        assert!(script.contains("key=/tls/tls.key"));
+        assert!(script.contains("verify=0"));
+    }
+
+    #[test]
+    fn test_tls_443_to_80_forwarding() {
+        let ports = vec![
+            ServicePort {
+                name: Some("http".to_string()),
+                port: 80,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let script = get_netbird_launch_script(
+            NetbirdForwardingMode::Socat,
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            Some(&"my-tls-secret".to_string()),
+            None, // No explicit TLS port, should default to 443->80
+        );
+
+        // Should create TLS termination on 443 forwarding to port 80
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("TCP:10.0.0.1:80"));
+    }
+
+    #[test]
+    fn test_regular_socat_without_tls() {
+        let ports = vec![
+            ServicePort {
+                name: Some("http".to_string()),
+                port: 80,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let script = get_netbird_launch_script(
+            NetbirdForwardingMode::Socat,
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            None, // No TLS secret
+            None,
+        );
+
+        // Should use regular TCP socat, not openssl-listen
+        assert!(script.contains("TCP-LISTEN:80"));
+        assert!(!script.contains("openssl-listen"));
+        assert!(!script.contains("cert="));
+    }
+}
