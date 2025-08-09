@@ -449,7 +449,11 @@ impl TunnelProvider for NetbirdConfig {
             metadata: ObjectMeta {
                 name: Some(resource_name.clone()),
                 namespace: Some(resource_namespace.clone()),
-                owner_references: if owner_references.is_empty() { None } else { Some(owner_references) },
+                owner_references: if owner_references.is_empty() {
+                    None
+                } else {
+                    Some(owner_references)
+                },
                 labels: Some(match_labels.clone()),
                 ..Default::default()
             },
