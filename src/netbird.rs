@@ -322,8 +322,10 @@ impl TunnelProvider for NetbirdConfig {
             BTreeMap::new()
         };
 
-        // Construct anti-affinity rules based on topology key.
+        // Construct affinity rules: both anti-affinity for spreading replicas and affinity for target service locality
+        let pod_affinity = crate::build_pod_affinity_for_service(service);
         let affinity = Affinity {
+            pod_affinity,
             pod_anti_affinity: Some(k8s_openapi::api::core::v1::PodAntiAffinity {
                 required_during_scheduling_ignored_during_execution: Some(vec![
                     k8s_openapi::api::core::v1::PodAffinityTerm {
