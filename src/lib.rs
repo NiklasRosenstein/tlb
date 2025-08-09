@@ -110,6 +110,14 @@ pub struct ServiceAnnotations {
 
     /// A comma-separated list of node labels to use as node selectors for the tunnel pods.
     pub node_selector: Option<String>,
+
+    /// Name of the Kubernetes secret containing TLS certificate for termination.
+    /// When specified, TLS termination will be performed using socat.
+    pub tls_secret_name: Option<String>,
+
+    /// Port to which TLS termination should be applied. Only considered when tls_secret_name is set.
+    /// If not set, defaults are applied based on service ports (443 if available, or 443->80 if only 80 is available).
+    pub tls_port: Option<u16>,
 }
 
 impl From<BTreeMap<String, String>> for ServiceAnnotations {
@@ -122,12 +130,18 @@ impl From<BTreeMap<String, String>> for ServiceAnnotations {
             .unwrap_or(1);
         let topology_key = annotations.get("tlb.io/topology-key").cloned();
         let node_selector = annotations.get("tlb.io/node-selector").cloned();
+        let tls_secret_name = annotations.get("tlb.io/tls-secret-name").cloned();
+        let tls_port = annotations
+            .get("tlb.io/tls-port")
+            .and_then(|s| s.parse().ok());
 
         ServiceAnnotations {
             dns,
             replicas,
             topology_key,
             node_selector,
+            tls_secret_name,
+            tls_port,
         }
     }
 }

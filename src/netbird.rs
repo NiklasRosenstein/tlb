@@ -62,6 +62,8 @@ fn get_netbird_launch_script(
     netbird_iface: String,
     up_command: String,
     ports: &[ServicePort],
+    tls_secret_name: Option<&String>,
+    tls_port: Option<u16>,
 ) -> String {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
@@ -76,17 +78,41 @@ fn get_netbird_launch_script(
         }
     }
 
+    // Determine the TLS termination port if TLS is configured
+    let tls_termination_port = if tls_secret_name.is_some() {
+        if let Some(port) = tls_port {
+            Some(port)
+        } else {
+            // Apply default TLS port logic as per requirements
+            let has_443 = ports.iter().any(|p| p.port == 443);
+            let has_80 = ports.iter().any(|p| p.port == 80);
+            
+            if has_443 {
+                Some(443)
+            } else if has_80 && !has_443 {
+                Some(443) // Listen on 443, forward to 80
+            } else {
+                None // Will need to log error later
+            }
+        }
+    } else {
+        None
+    };
+
     ports.iter().for_each(|port| {
         let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
         let protocol_upper = protocol.to_uppercase();
-        let port = port.port;
+        let port_num = port.port;
+
+        // Check if this port should have TLS termination
+        let is_tls_port = tls_termination_port == Some(port_num as u16);
 
         match forwarding_mode {
             NetbirdForwardingMode::Iptables => {
                 // Accept new connections to the cluster IP and port.
                 launch_script.push(format!(
                     "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -p {protocol} -d {service_ip} --dport {port} -m conntrack \
+                        -p {protocol} -d {service_ip} --dport {port_num} -m conntrack \
                         --ctstate NEW -j ACCEPT"
                 ));
 
@@ -103,26 +129,90 @@ fn get_netbird_launch_script(
                 // NAT packets destined for the cluster IP and port.
                 launch_script.push(format!(
                     "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                        -p {protocol} --dport {port} -j DNAT \
-                        --to-destination {service_ip}:{port}"
+                        -p {protocol} --dport {port_num} -j DNAT \
+                        --to-destination {service_ip}:{port_num}"
                 ));
 
                 launch_script.push(format!(
                     "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
                 ));
             }
-            NetbirdForwardingMode::Socat => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_ip}:{port} &"
-            )),
-            NetbirdForwardingMode::SocatWithDns => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_name}.{service_namespace}:{port} &"
-            )),
+            NetbirdForwardingMode::Socat => {
+                if is_tls_port && protocol.to_lowercase() == "tcp" {
+                    // TLS termination with socat
+                    launch_script.push(format!(
+                        "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
+                            TCP:{service_ip}:{port_num} &"
+                    ));
+                } else {
+                    // Regular socat forwarding
+                    launch_script.push(format!(
+                        "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
+                            {protocol_upper}:{service_ip}:{port_num} &"
+                    ));
+                }
+            }
+            NetbirdForwardingMode::SocatWithDns => {
+                if is_tls_port && protocol.to_lowercase() == "tcp" {
+                    // TLS termination with socat using DNS
+                    launch_script.push(format!(
+                        "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
+                            TCP:{service_name}.{service_namespace}:{port_num} &"
+                    ));
+                } else {
+                    // Regular socat forwarding with DNS
+                    launch_script.push(format!(
+                        "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
+                            {protocol_upper}:{service_name}.{service_namespace}:{port_num} &"
+                    ));
+                }
+            }
         }
-
-        launch_script.push("apk add socat".to_owned());
     });
+
+    // Special case: TLS termination on 443 forwarding to 80 when service only has port 80
+    if let Some(tls_port) = tls_termination_port {
+        let has_explicit_tls_port = ports.iter().any(|p| p.port == tls_port as i32);
+        if !has_explicit_tls_port && tls_port == 443 {
+            // Check if we have port 80
+            if let Some(port_80) = ports.iter().find(|p| p.port == 80) {
+                let protocol = port_80.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+                if protocol == "tcp" {
+                    match forwarding_mode {
+                        NetbirdForwardingMode::Iptables => {
+                            // Add iptables rules for 443 -> 80 forwarding
+                            launch_script.push(format!(
+                                "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                                    -p tcp -d {service_ip} --dport 80 -m conntrack \
+                                    --ctstate NEW -j ACCEPT"
+                            ));
+                            launch_script.push(format!(
+                                "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
+                                    -p tcp --dport 443 -j DNAT \
+                                    --to-destination {service_ip}:80"
+                            ));
+                        }
+                        NetbirdForwardingMode::Socat => {
+                            // TLS termination on 443 forwarding to HTTP on 80
+                            launch_script.push(format!(
+                                "socat openssl-listen:443,fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
+                                    TCP:{service_ip}:80 &"
+                            ));
+                        }
+                        NetbirdForwardingMode::SocatWithDns => {
+                            // TLS termination on 443 forwarding to HTTP on 80 using DNS
+                            launch_script.push(format!(
+                                "socat openssl-listen:443,fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
+                                    TCP:{service_name}.{service_namespace}:80 &"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    launch_script.push("apk add socat".to_owned());
 
     // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
     launch_script.push(format!(
@@ -219,6 +309,32 @@ impl TunnelProvider for NetbirdConfig {
             .clone()
             .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
 
+        // Validate TLS configuration and determine TLS port
+        if let Some(tls_secret_name) = &options.tls_secret_name {
+            if options.tls_port.is_none() {
+                // Apply default TLS port logic as per requirements
+                let has_443 = ports.iter().any(|p| p.port == 443);
+                let has_80 = ports.iter().any(|p| p.port == 80);
+                
+                if !has_443 && !has_80 {
+                    // Error condition: neither 443 nor 80 are available and no explicit tls_port is set
+                    ctx.events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            "TLSConfigurationError".into(),
+                            Some(format!(
+                                "TLS secret '{}' is configured but service has neither port 443 nor port 80, and no tlb.io/tls-port annotation is set. \
+                                TLS termination requires an explicit port annotation in this case.",
+                                tls_secret_name
+                            )),
+                            "Reconcile".into(),
+                        )
+                        .await?;
+                }
+            }
+        }
+
         // Construct commands for setting up iptables in the Netbird pod.
         let launch_script = get_netbird_launch_script(
             self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat),
@@ -233,6 +349,8 @@ impl TunnelProvider for NetbirdConfig {
                 .clone()
                 .unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
             &ports,
+            options.tls_secret_name.as_ref(),
+            options.tls_port,
         );
 
         let mut env = vec![
@@ -428,12 +546,39 @@ impl TunnelProvider for NetbirdConfig {
                 ..Default::default()
             }]);
         }
-        let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
-        container.volume_mounts = Some(vec![VolumeMount {
+        // Setup volumes and volume mounts
+        let mut volume_mounts = vec![VolumeMount {
             name: "netbird-data".into(),
             mount_path: "/var/lib/netbird".into(),
             ..Default::default()
-        }]);
+        }];
+
+        // Add TLS secret volume and mount if configured
+        if let Some(tls_secret_name) = &options.tls_secret_name {
+            // Add TLS secret volume to the pod
+            let mut volumes = pod_template.spec.as_mut().unwrap().volumes.take().unwrap_or_default();
+            volumes.push(Volume {
+                name: "tls-secret".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    secret_name: Some(tls_secret_name.clone()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            pod_template.spec.as_mut().unwrap().volumes = Some(volumes);
+
+            // Add TLS secret volume mount
+            volume_mounts.push(VolumeMount {
+                name: "tls-secret".into(),
+                mount_path: "/tls".into(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
+
+        // Apply volume mounts to the container
+        let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
+        container.volume_mounts = Some(volume_mounts);
 
         statefulset_spec.template = pod_template;
 
