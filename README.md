@@ -110,6 +110,7 @@ Configure your tunnels using these Service annotations:
 
 - **Purpose**: Enables TLS termination using certificates from a Kubernetes secret
 - **Format**: Name of a `kubernetes.io/tls` type secret containing `tls.crt` and `tls.key`
+- **Requirements**: Only supported with `Socat` or `SocatWithDns` forwarding modes (not `Iptables`)
 - **Behavior**: When specified, socat is configured with `openssl-listen` for TLS termination
 - **Example**: `"my-tls-secret"`
 
@@ -117,6 +118,7 @@ Configure your tunnels using these Service annotations:
 
 - **Purpose**: Specifies which port should have TLS termination applied
 - **Format**: Port number as string
+- **Requirements**: Only supported with `Socat` or `SocatWithDns` forwarding modes (not `Iptables`)
 - **Default behavior** when `tlb.io/tls-secret-name` is set but `tlb.io/tls-port` is not:
   - If service has port 443: TLS termination on port 443
   - If service has port 80 but not 443: TLS termination on port 443, forwarding to port 80
@@ -131,9 +133,26 @@ NetBird provider supports TLS termination using socat with certificates stored i
 - Forward decrypted traffic to HTTP services
 - Support HTTPS services with certificate management in Kubernetes
 
+**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not supported with the `Iptables` forwarding mode.
+
 ### TLS Termination Example
 
 ```yaml
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: netbird
+spec:
+  netbird:
+    managementUrl: https://netbird.example.com
+    setupKeyRef:
+      name: netbird-setup-key
+      namespace: default
+      key: setupKey
+    # TLS termination requires Socat or SocatWithDns forwarding mode
+    forwardingMode: Socat
+
 ---
 apiVersion: v1
 kind: Secret
@@ -294,6 +313,22 @@ spec:
 Expose an HTTP service with TLS termination:
 
 ```yaml
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: netbird
+spec:
+  netbird:
+    managementUrl: https://netbird.example.com
+    setupKeyRef:
+      name: netbird-setup-key
+      namespace: default
+      key: setupKey
+    # TLS termination requires Socat or SocatWithDns forwarding mode
+    forwardingMode: Socat
+
+---
 apiVersion: v1
 kind: Service
 metadata:

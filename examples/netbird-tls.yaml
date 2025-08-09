@@ -11,6 +11,8 @@ spec:
       namespace: default
       key: setupKey
     storageClass: standard
+    # TLS termination requires Socat or SocatWithDns forwarding mode
+    forwardingMode: Socat
 
 ---
 apiVersion: v1

@@ -212,8 +212,6 @@ fn get_netbird_launch_script(
         }
     }
 
-    launch_script.push("apk add socat".to_owned());
-
     // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
     launch_script.push(format!(
         "( \
@@ -310,7 +308,27 @@ impl TunnelProvider for NetbirdConfig {
             .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
 
         // Validate TLS configuration and determine TLS port
+        let forwarding_mode = self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat);
         if let Some(tls_secret_name) = &options.tls_secret_name {
+            // Validate that TLS termination is only used with Socat modes
+            if forwarding_mode == NetbirdForwardingMode::Iptables {
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        "TLSConfigurationError".into(),
+                        Some(format!(
+                            "TLS termination is not supported with iptables forwarding mode. \
+                            TLS secret '{}' is configured but the NetBird forwarding mode is set to 'Iptables'. \
+                            TLS termination requires 'Socat' or 'SocatWithDns' forwarding mode.",
+                            tls_secret_name
+                        )),
+                        "Reconcile".into(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+
             if options.tls_port.is_none() {
                 // Apply default TLS port logic as per requirements
                 let has_443 = ports.iter().any(|p| p.port == 443);
@@ -337,7 +355,7 @@ impl TunnelProvider for NetbirdConfig {
 
         // Construct commands for setting up iptables in the Netbird pod.
         let launch_script = get_netbird_launch_script(
-            self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat),
+            forwarding_mode,
             cluster_ip,
             svc_name.clone(),
             svc_namespace.clone(),
@@ -962,5 +980,35 @@ mod tests {
         assert!(script.contains("TCP-LISTEN:80"));
         assert!(!script.contains("openssl-listen"));
         assert!(!script.contains("cert="));
+    }
+
+    #[test]
+    fn test_iptables_mode_without_tls() {
+        let ports = vec![
+            ServicePort {
+                name: Some("http".to_string()),
+                port: 80,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        let script = get_netbird_launch_script(
+            NetbirdForwardingMode::Iptables,
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            None, // No TLS secret
+            None,
+        );
+
+        // Should use iptables, not socat
+        assert!(script.contains("iptables"));
+        assert!(!script.contains("socat"));
+        assert!(!script.contains("openssl-listen"));
     }
 }

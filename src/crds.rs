@@ -128,6 +128,9 @@ pub enum NetbirdForwardingMode {
     /// [Experimental] Setup forwarding with `iptables` rules.
     ///
     /// This mode is known to have issues with ports other than 80/443 (don't ask me why).
+    /// 
+    /// **Important:** TLS termination is not supported with this mode. Use `Socat` or `SocatWithDns` 
+    /// for TLS termination functionality.
     Iptables,
 
     /// [Experimental] Install and run  `socat` to forward traffic. When this mode is used as the `socat` program
@@ -135,6 +138,7 @@ pub enum NetbirdForwardingMode {
     /// only `apk` is supported.
     ///
     /// This mode is more stable and generally usable than [`NetbirdForwardingMode::Iptables`] at this time.
+    /// **This mode supports TLS termination** using the `tlb.io/tls-secret-name` and `tlb.io/tls-port` annotations.
     Socat,
 
     /// [Experimental] Same as [`NetbirdForwardingMode::Socat`], only that instead of hard-coding the Kubernetes
@@ -144,6 +148,7 @@ pub enum NetbirdForwardingMode {
     /// When DNS resolution works as expected in the Netbird Pod, this mode is preferred as it allows for the
     /// Service IP to change without having to update the Deployment and recreate the Pod (causing a churn of the
     /// LoadBalancer IP).
+    /// **This mode supports TLS termination** using the `tlb.io/tls-secret-name` and `tlb.io/tls-port` annotations.
     SocatWithDns,
 }
 
