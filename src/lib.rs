@@ -131,9 +131,7 @@ impl From<BTreeMap<String, String>> for ServiceAnnotations {
         let topology_key = annotations.get("tlb.io/topology-key").cloned();
         let node_selector = annotations.get("tlb.io/node-selector").cloned();
         let tls_secret_name = annotations.get("tlb.io/tls-secret-name").cloned();
-        let tls_port = annotations
-            .get("tlb.io/tls-port")
-            .and_then(|s| s.parse().ok());
+        let tls_port = annotations.get("tlb.io/tls-port").and_then(|s| s.parse().ok());
 
         ServiceAnnotations {
             dns,

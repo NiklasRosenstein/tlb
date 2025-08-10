@@ -86,11 +86,9 @@ fn get_netbird_launch_script(
             // Apply default TLS port logic as per requirements
             let has_443 = ports.iter().any(|p| p.port == 443);
             let has_80 = ports.iter().any(|p| p.port == 80);
-            
-            if has_443 {
+
+            if has_443 || has_80 {
                 Some(443)
-            } else if has_80 && !has_443 {
-                Some(443) // Listen on 443, forward to 80
             } else {
                 None // Will need to log error later
             }
@@ -333,7 +331,7 @@ impl TunnelProvider for NetbirdConfig {
                 // Apply default TLS port logic as per requirements
                 let has_443 = ports.iter().any(|p| p.port == 443);
                 let has_80 = ports.iter().any(|p| p.port == 80);
-                
+
                 if !has_443 && !has_80 {
                     // Error condition: neither 443 nor 80 are available and no explicit tls_port is set
                     ctx.events
