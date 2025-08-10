@@ -78,32 +78,29 @@ fn get_netbird_launch_script(
         }
     }
 
-    // Determine the TLS termination port if TLS is configured
-    let tls_termination_port = if tls_secret_name.is_some() {
-        if let Some(port) = tls_port {
-            Some(port)
-        } else {
-            // Apply default TLS port logic as per requirements
-            let has_443 = ports.iter().any(|p| p.port == 443);
-            let has_80 = ports.iter().any(|p| p.port == 80);
-
-            if has_443 || has_80 {
-                Some(443)
-            } else {
-                None // Will need to log error later
-            }
-        }
-    } else {
-        None
-    };
-
     ports.iter().for_each(|port| {
         let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
         let protocol_upper = protocol.to_uppercase();
         let port_num = port.port;
 
-        // Check if this port should have TLS termination
-        let is_tls_port = tls_termination_port == Some(port_num as u16);
+        // Determine TLS termination logic for this port
+        let should_use_tls = if let Some(tls_port) = tls_port {
+            // Explicit TLS port specified - use TLS only for that port
+            port_num == tls_port as i32
+        } else if tls_secret_name.is_some() {
+            // TLS secret specified but no explicit port - apply default logic
+            if port_num == 443 {
+                // Port 443 gets TLS termination
+                true
+            } else if port_num == 80 && !ports.iter().any(|p| p.port == 443) {
+                // Port 80 gets TLS termination only if there's no port 443
+                false // We'll handle 443->80 forwarding separately below
+            } else {
+                false
+            }
+        } else {
+            false
+        };
 
         match forwarding_mode {
             NetbirdForwardingMode::Iptables => {
@@ -136,7 +133,7 @@ fn get_netbird_launch_script(
                 ));
             }
             NetbirdForwardingMode::Socat => {
-                if is_tls_port && protocol.to_lowercase() == "tcp" {
+                if should_use_tls && protocol.to_lowercase() == "tcp" {
                     // TLS termination with socat
                     launch_script.push(format!(
                         "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
@@ -151,7 +148,7 @@ fn get_netbird_launch_script(
                 }
             }
             NetbirdForwardingMode::SocatWithDns => {
-                if is_tls_port && protocol.to_lowercase() == "tcp" {
+                if should_use_tls && protocol.to_lowercase() == "tcp" {
                     // TLS termination with socat using DNS
                     launch_script.push(format!(
                         "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
@@ -168,17 +165,19 @@ fn get_netbird_launch_script(
         }
     });
 
-    // Special case: TLS termination on 443 forwarding to 80 when service only has port 80
-    if let Some(tls_port) = tls_termination_port {
-        let has_explicit_tls_port = ports.iter().any(|p| p.port == tls_port as i32);
-        if !has_explicit_tls_port && tls_port == 443 {
-            // Check if we have port 80
+    // Handle special case: TLS termination on 443 forwarding to 80 when service only has port 80
+    if tls_secret_name.is_some() && tls_port.is_none() {
+        // Check if we have port 80 but no port 443
+        let has_80 = ports.iter().any(|p| p.port == 80);
+        let has_443 = ports.iter().any(|p| p.port == 443);
+
+        if has_80 && !has_443 {
             if let Some(port_80) = ports.iter().find(|p| p.port == 80) {
                 let protocol = port_80.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
                 if protocol == "tcp" {
                     match forwarding_mode {
                         NetbirdForwardingMode::Iptables => {
-                            // Add iptables rules for 443 -> 80 forwarding
+                            // Add iptables rules for 443 -> 80 forwarding (no TLS support in iptables mode)
                             launch_script.push(format!(
                                 "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
                                     -p tcp -d {service_ip} --dport 80 -m conntrack \
