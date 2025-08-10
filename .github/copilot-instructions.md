@@ -37,10 +37,8 @@ information that does not match the info here.
 - `cargo fmt` -- formats code (~1 second)
 - `cargo fmt --check` -- verifies formatting without changes
 - `cargo clippy -- -D warnings` -- lints code with warnings as errors (~1-3 seconds)
-  - **IMPORTANT**: Currently fails with exactly 46 linting warnings about string formatting in `src/cloudflare.rs` and
-    `src/netbird.rs`
   - Use `cargo clippy --fix --allow-dirty --allow-staged` to auto-fix all formatting issues (~7 seconds)
-  - **CRITICAL**: Always run `git checkout .` after auto-fix to avoid committing unintended changes during exploration
+  - Do commit auto-fixes.
   - After auto-fix, `cargo clippy -- -D warnings` should pass with 0 warnings
 
 #### CRD Management
@@ -94,8 +92,6 @@ validate core functionality:
   failed to create kube::Client: InferConfig(InferConfigError...
   ```
   - This is expected and indicates the controller is correctly trying to connect to Kubernetes
-- Running `cargo clippy -- -D warnings` should fail with exactly 46 formatting-related errors
-  - This is a known issue that can be auto-fixed but should not be committed during exploration
 
 #### Compilation Validation
 
@@ -195,7 +191,7 @@ Use this checklist to verify the instructions work correctly:
 # 1. Components check
 rustup component list --installed | grep -E "(rustfmt|clippy)"
 
-# 2. Build verification 
+# 2. Build verification
 cargo check && cargo build
 
 # 3. Test execution
