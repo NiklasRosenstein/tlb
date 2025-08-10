@@ -372,7 +372,8 @@ kind: Service
 metadata:
   name: secure-app
   annotations:
-    tlb.io/dns: "secure.netbird.local"
+    tlb.io/dns: "secure.netbird.selfhosted"
+    tlb.io/map-ports: "443/tls:http"
     tlb.io/tls-secret-name: "my-tls-cert"
     tlb.io/replicas: "2"
 spec:
@@ -384,7 +385,7 @@ spec:
       name: http
   selector:
     app: secure-app
-# This will create TLS termination on port 443 forwarding to HTTP port 80
+# This will create TLS termination on port 443 forwarding to HTTP port 8080
 ```
 
 ## ⚠️ Important Limitations
