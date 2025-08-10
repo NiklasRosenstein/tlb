@@ -261,6 +261,11 @@ impl TunnelProvider for NetbirdConfig {
                 }),
                 ..Default::default()
             },
+            EnvVar {
+                name: "NB_CONFIG".into(),
+                value: Some("/var/lib/netbird/config.json".into()),
+                ..Default::default()
+            },
         ];
 
         let mut announce_type = self.announce_type.clone().unwrap_or(DEFAULT_ANNOUNCE_TYPE);
