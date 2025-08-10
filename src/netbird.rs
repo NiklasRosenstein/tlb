@@ -7,7 +7,7 @@ use k8s_openapi::{
         core::v1::{
             Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
             LoadBalancerIngress, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec,
-            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
+            Secret, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
             VolumeResourceRequirements,
         },
     },
@@ -101,7 +101,6 @@ fn get_netbird_launch_script(
         for mapping in mappings {
             // Resolve service port to actual port number and protocol
             let (target_port, protocol) = resolve_port_mapping(&mapping, ports)?;
-            let protocol_upper = protocol.to_uppercase();
 
             let listen_spec = if mapping.listen_tls {
                 format!(
@@ -109,7 +108,7 @@ fn get_netbird_launch_script(
                     mapping.listen_port
                 )
             } else {
-                format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
+                format!("{protocol}-listen:{},fork,reuseaddr", mapping.listen_port)
             };
 
             let target_spec = if mapping.service_tls {
@@ -118,9 +117,9 @@ fn get_netbird_launch_script(
                 } else {
                     "verify=0"
                 };
-                format!("OPENSSL:{service_ip}:{target_port},{verify}")
+                format!("openssl:{service_ip}:{target_port},{verify}")
             } else {
-                format!("{protocol_upper}:{service_ip}:{target_port}")
+                format!("{protocol}:{service_ip}:{target_port}")
             };
 
             launch_script.push(format!("socat {listen_spec} {target_spec} &"));
@@ -129,13 +128,12 @@ fn get_netbird_launch_script(
         // Default behavior: direct 1:1 port mapping without TLS
         ports.iter().for_each(|port| {
             let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
-            let protocol_upper = protocol.to_uppercase();
             let port_num = port.port;
 
             // Regular socat forwarding without TLS
             launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
-                    {protocol_upper}:{service_ip}:{port_num} &"
+                "socat {protocol}-listen:{port_num},fork,reuseaddr \
+                    {protocol}:{service_ip}:{port_num} &"
             ));
         });
     }
@@ -503,8 +501,32 @@ impl TunnelProvider for NetbirdConfig {
             .unwrap_or(false);
 
         // Add TLS secret volume and mount if TLS is used in port mappings
+        let mut secret_resource_version: Option<String> = None;
         if needs_tls_secret {
             if let Some(tls_secret_name) = &options.tls_secret_name {
+                // Get the TLS secret to track its resourceVersion for pod rotation
+                let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), svc_namespace);
+                match secret_api.get_opt(tls_secret_name).await? {
+                    Some(secret) => {
+                        secret_resource_version = secret.metadata.resource_version.clone();
+                    }
+                    None => {
+                        ctx.events
+                            .publish(
+                                &service.object_ref(&()),
+                                EventType::Warning,
+                                "TLSSecretNotFound".into(),
+                                Some(format!(
+                                    "TLS secret '{}' not found in namespace '{}'",
+                                    tls_secret_name, svc_namespace
+                                )),
+                                "Reconcile".into(),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                }
+
                 // Add TLS secret volume to the pod
                 let mut volumes = pod_template.spec.as_mut().unwrap().volumes.take().unwrap_or_default();
                 volumes.push(Volume {
@@ -545,6 +567,17 @@ impl TunnelProvider for NetbirdConfig {
         // Apply volume mounts to the container
         let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
         container.volume_mounts = Some(volume_mounts);
+
+        // Add secret resource version to pod template annotations to trigger pod rotation when secret changes
+        if let Some(resource_version) = secret_resource_version {
+            let mut annotations = pod_template
+                .metadata
+                .as_ref()
+                .and_then(|m| m.annotations.clone())
+                .unwrap_or_default();
+            annotations.insert("tlb.io/tls-secret-version".to_string(), resource_version);
+            pod_template.metadata.as_mut().unwrap().annotations = Some(annotations);
+        }
 
         statefulset_spec.template = pod_template;
 
@@ -910,7 +943,7 @@ mod tests {
         assert!(script.contains("cert=/tls/tls.crt"));
         assert!(script.contains("key=/tls/tls.key"));
         assert!(script.contains("verify=0"));
-        assert!(script.contains("TCP:10.0.0.1:443"));
+        assert!(script.contains("tcp:10.0.0.1:443"));
     }
 
     #[test]
@@ -944,7 +977,7 @@ mod tests {
 
         // Should create TLS termination on 443 forwarding to port 80 (resolved from "http" port name)
         assert!(script.contains("openssl-listen:443"));
-        assert!(script.contains("TCP:10.0.0.1:80"));
+        assert!(script.contains("tcp:10.0.0.1:80"));
     }
 
     #[test]
@@ -978,7 +1011,7 @@ mod tests {
 
         // Should create TLS termination on 443 connecting to TLS service on 5001 without verification
         assert!(script.contains("openssl-listen:443"));
-        assert!(script.contains("OPENSSL:10.0.0.1:5001,verify=0"));
+        assert!(script.contains("openssl:10.0.0.1:5001,verify=0"));
     }
 
     #[test]
@@ -1003,7 +1036,7 @@ mod tests {
         .unwrap();
 
         // Should use regular TCP socat, not openssl-listen
-        assert!(script.contains("TCP-LISTEN:80"));
+        assert!(script.contains("tcp-listen:80"));
         assert!(!script.contains("openssl-listen"));
         assert!(!script.contains("cert="));
     }
