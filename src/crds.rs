@@ -98,8 +98,6 @@ pub struct NetbirdConfig {
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
     /// [`NetbirdAnnounceType::IP`].
     pub announce_type: Option<NetbirdAnnounceType>,
-    /// How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
-    pub forwarding_mode: Option<NetbirdForwardingMode>,
     /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
     pub resource_prefix: Option<String>,
     /// The storage class to use for the persistent volume claim. If this is not set, an emptyDir
@@ -120,29 +118,6 @@ pub enum NetbirdAnnounceType {
     /// server. Hence, this option cannot usually be used with a public DNS server like Google DNS, Cloudflare DNS, etc.
     #[allow(clippy::upper_case_acronyms)]
     DNS,
-}
-
-/// Specifies how forwarding is implemented in the Netbird pod(s) that are created for the service.
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
-pub enum NetbirdForwardingMode {
-    /// [Experimental] Install and run  `socat` to forward traffic. When this mode is used as the `socat` program
-    /// is not available in the Netbird image, it will be installed using the image's package manager. Currently,
-    /// only `apk` is supported.
-    ///
-    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with
-    /// `tlb.io/tls-secret-name` for certificate configuration.
-    Socat,
-
-    /// [Experimental] Same as [`NetbirdForwardingMode::Socat`], only that instead of hard-coding the Kubernetes
-    /// service IP as the destination, it uses the DNS name of the service. This is not the default because there
-    /// are some issues with DNS resolution in the Netbird image where it takes precedence.
-    ///
-    /// When DNS resolution works as expected in the Netbird Pod, this mode is preferred as it allows for the
-    /// Service IP to change without having to update the Deployment and recreate the Pod (causing a churn of the
-    /// LoadBalancer IP).
-    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with
-    /// `tlb.io/tls-secret-name` for certificate configuration.
-    SocatWithDns,
 }
 
 ///

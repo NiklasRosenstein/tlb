@@ -31,7 +31,7 @@ use tokio::{
 
 use crate::{
     Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{NetbirdAnnounceType, NetbirdConfig, NetbirdForwardingMode},
+    crds::{NetbirdAnnounceType, NetbirdConfig},
     simpleevent::SimpleEventRecorder,
 };
 
@@ -54,10 +54,9 @@ pub const NETBIRD_PEER_IP_PORT: u16 = 15411;
 ///
 #[allow(clippy::too_many_arguments)]
 fn get_netbird_launch_script(
-    forwarding_mode: NetbirdForwardingMode,
     service_ip: String,
-    service_name: String,
-    service_namespace: String,
+    _service_name: String,
+    _service_namespace: String,
     _cluster_iface: String,
     netbird_iface: String,
     up_command: String,
@@ -84,7 +83,11 @@ fn get_netbird_launch_script(
             } else {
                 // Look up port by name
                 if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
-                    let protocol = service_port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+                    let protocol = service_port
+                        .protocol
+                        .as_ref()
+                        .unwrap_or(&"TCP".to_string())
+                        .to_lowercase();
                     (service_port.port, protocol)
                 } else {
                     // Skip this mapping if port name not found
@@ -93,54 +96,27 @@ fn get_netbird_launch_script(
             };
             let protocol_upper = protocol.to_uppercase();
 
-            match forwarding_mode {
-                NetbirdForwardingMode::Socat => {
-                    let listen_spec = if mapping.listen_tls {
-                        format!(
-                            "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
-                            mapping.listen_port
-                        )
-                    } else {
-                        format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
-                    };
+            let listen_spec = if mapping.listen_tls {
+                format!(
+                    "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
+                    mapping.listen_port
+                )
+            } else {
+                format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
+            };
 
-                    let target_spec = if mapping.service_tls {
-                        let verify = if mapping.service_tls_verify {
-                            "verify=1"
-                        } else {
-                            "verify=0"
-                        };
-                        format!("OPENSSL:{service_ip}:{target_port},{verify}")
-                    } else {
-                        format!("{protocol_upper}:{service_ip}:{target_port}")
-                    };
+            let target_spec = if mapping.service_tls {
+                let verify = if mapping.service_tls_verify {
+                    "verify=1"
+                } else {
+                    "verify=0"
+                };
+                format!("OPENSSL:{service_ip}:{target_port},{verify}")
+            } else {
+                format!("{protocol_upper}:{service_ip}:{target_port}")
+            };
 
-                    launch_script.push(format!("{listen_spec} {target_spec} &"));
-                }
-                NetbirdForwardingMode::SocatWithDns => {
-                    let listen_spec = if mapping.listen_tls {
-                        format!(
-                            "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
-                            mapping.listen_port
-                        )
-                    } else {
-                        format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
-                    };
-
-                    let target_spec = if mapping.service_tls {
-                        let verify = if mapping.service_tls_verify {
-                            "verify=1"
-                        } else {
-                            "verify=0"
-                        };
-                        format!("OPENSSL:{service_name}.{service_namespace}:{target_port},{verify}")
-                    } else {
-                        format!("{protocol_upper}:{service_name}.{service_namespace}:{target_port}")
-                    };
-
-                    launch_script.push(format!("{listen_spec} {target_spec} &"));
-                }
-            }
+            launch_script.push(format!("socat {listen_spec} {target_spec} &"));
         }
     } else {
         // Default behavior: direct 1:1 port mapping without TLS
@@ -149,22 +125,11 @@ fn get_netbird_launch_script(
             let protocol_upper = protocol.to_uppercase();
             let port_num = port.port;
 
-            match forwarding_mode {
-                NetbirdForwardingMode::Socat => {
-                    // Regular socat forwarding without TLS
-                    launch_script.push(format!(
-                        "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
-                            {protocol_upper}:{service_ip}:{port_num} &"
-                    ));
-                }
-                NetbirdForwardingMode::SocatWithDns => {
-                    // Regular socat forwarding with DNS without TLS
-                    launch_script.push(format!(
-                        "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
-                            {protocol_upper}:{service_name}.{service_namespace}:{port_num} &"
-                    ));
-                }
-            }
+            // Regular socat forwarding without TLS
+            launch_script.push(format!(
+                "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
+                    {protocol_upper}:{service_ip}:{port_num} &"
+            ));
         });
     }
 
@@ -272,7 +237,6 @@ impl TunnelProvider for NetbirdConfig {
             .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
 
         // Parse and validate port mappings
-        let forwarding_mode = self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat);
         let port_mappings = if let Some(map_ports_str) = &options.map_ports {
             match crate::PortMapping::parse_multiple(map_ports_str) {
                 Ok(mappings) => Some(mappings),
@@ -295,7 +259,6 @@ impl TunnelProvider for NetbirdConfig {
 
         // Construct commands for setting up port forwarding in the Netbird pod.
         let launch_script = get_netbird_launch_script(
-            forwarding_mode,
             cluster_ip,
             svc_name.clone(),
             svc_namespace.clone(),
@@ -911,7 +874,6 @@ mod tests {
         }]);
 
         let script = get_netbird_launch_script(
-            NetbirdForwardingMode::Socat,
             "10.0.0.1".to_string(),
             "test-service".to_string(),
             "default".to_string(),
@@ -947,7 +909,6 @@ mod tests {
         }]);
 
         let script = get_netbird_launch_script(
-            NetbirdForwardingMode::Socat,
             "10.0.0.1".to_string(),
             "test-service".to_string(),
             "default".to_string(),
@@ -981,7 +942,6 @@ mod tests {
         }]);
 
         let script = get_netbird_launch_script(
-            NetbirdForwardingMode::Socat,
             "10.0.0.1".to_string(),
             "test-service".to_string(),
             "default".to_string(),
@@ -1007,7 +967,6 @@ mod tests {
         }];
 
         let script = get_netbird_launch_script(
-            NetbirdForwardingMode::Socat,
             "10.0.0.1".to_string(),
             "test-service".to_string(),
             "default".to_string(),
