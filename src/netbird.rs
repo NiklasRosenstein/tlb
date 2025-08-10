@@ -243,14 +243,6 @@ impl TunnelProvider for NetbirdConfig {
     }
 
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let owner_references = vec![OwnerReference {
-            api_version: "v1".into(),
-            kind: "Service".into(),
-            name: service.name_any(),
-            uid: service.metadata.uid.clone().unwrap_or_default(),
-            controller: Some(false),
-            block_owner_deletion: Some(true),
-        }];
         let options = ServiceAnnotations::from(service.metadata.annotations.clone().unwrap_or_default());
         let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
 
@@ -294,6 +286,22 @@ impl TunnelProvider for NetbirdConfig {
         // not specified, we assume we're in a namespaced tunnel, so the secret and the service will
         // be in the same namespace.
         let resource_namespace = self.setup_key_ref.namespace.clone().unwrap_or(svc_namespace.clone());
+
+        // Only set owner references when the StatefulSet and Service are in the same namespace.
+        // This avoids OwnerRefInvalidNamespace errors when they're in different namespaces.
+        // Cleanup will still work through labels.
+        let owner_references = if resource_namespace == *svc_namespace {
+            vec![OwnerReference {
+                api_version: "v1".into(),
+                kind: "Service".into(),
+                name: service.name_any(),
+                uid: service.metadata.uid.clone().unwrap_or_default(),
+                controller: Some(false),
+                block_owner_deletion: Some(true),
+            }]
+        } else {
+            Vec::new()
+        };
 
         let pod_api = Api::<Pod>::namespaced(ctx.client.clone(), &resource_namespace);
         let svc_api = Api::<Service>::namespaced(ctx.client.clone(), svc_namespace);
@@ -456,8 +464,10 @@ impl TunnelProvider for NetbirdConfig {
             BTreeMap::new()
         };
 
-        // Construct anti-affinity rules based on topology key.
+        // Construct affinity rules: both anti-affinity for spreading replicas and affinity for target service locality
+        let pod_affinity = crate::build_pod_affinity_for_service(service);
         let affinity = Affinity {
+            pod_affinity,
             pod_anti_affinity: Some(k8s_openapi::api::core::v1::PodAntiAffinity {
                 required_during_scheduling_ignored_during_execution: Some(vec![
                     k8s_openapi::api::core::v1::PodAffinityTerm {
@@ -631,7 +641,11 @@ impl TunnelProvider for NetbirdConfig {
             metadata: ObjectMeta {
                 name: Some(resource_name.clone()),
                 namespace: Some(resource_namespace.clone()),
-                owner_references: Some(owner_references),
+                owner_references: if owner_references.is_empty() {
+                    None
+                } else {
+                    Some(owner_references)
+                },
                 labels: Some(match_labels.clone()),
                 ..Default::default()
             },
