@@ -127,13 +127,15 @@ Configure your tunnels using these Service annotations:
 
 ## 🔒 TLS Termination (NetBird)
 
-NetBird provider supports TLS termination using socat with certificates stored in Kubernetes secrets. This allows you to:
+NetBird provider supports TLS termination using socat with certificates stored in Kubernetes secrets. This allows you
+to:
 
 - Terminate TLS at the tunnel edge using your own certificates
 - Forward decrypted traffic to HTTP services
 - Support HTTPS services with certificate management in Kubernetes
 
-**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not supported with the `Iptables` forwarding mode.
+**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not
+supported with the `Iptables` forwarding mode.
 
 ### TLS Termination Example
 
@@ -197,7 +199,7 @@ spec:
 ### Port Selection Logic
 
 - **Explicit port**: Use `tlb.io/tls-port` annotation value
-- **Port 443 available**: Automatically use port 443 for TLS termination  
+- **Port 443 available**: Automatically use port 443 for TLS termination
 - **Only port 80 available**: Listen on 443, terminate TLS, forward to port 80
 - **Other ports**: Must specify `tlb.io/tls-port` explicitly or an error event is logged
 

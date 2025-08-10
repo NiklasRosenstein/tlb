@@ -893,14 +893,12 @@ mod tests {
 
     #[test]
     fn test_tls_socat_command_generation() {
-        let ports = vec![
-            ServicePort {
-                name: Some("https".to_string()),
-                port: 443,
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            },
-        ];
+        let ports = vec![ServicePort {
+            name: Some("https".to_string()),
+            port: 443,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
 
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Socat,
@@ -923,14 +921,12 @@ mod tests {
 
     #[test]
     fn test_tls_443_to_80_forwarding() {
-        let ports = vec![
-            ServicePort {
-                name: Some("http".to_string()),
-                port: 80,
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            },
-        ];
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
 
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Socat,
@@ -952,14 +948,12 @@ mod tests {
 
     #[test]
     fn test_regular_socat_without_tls() {
-        let ports = vec![
-            ServicePort {
-                name: Some("http".to_string()),
-                port: 80,
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            },
-        ];
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
 
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Socat,
@@ -982,14 +976,12 @@ mod tests {
 
     #[test]
     fn test_iptables_mode_without_tls() {
-        let ports = vec![
-            ServicePort {
-                name: Some("http".to_string()),
-                port: 80,
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            },
-        ];
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
 
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Iptables,

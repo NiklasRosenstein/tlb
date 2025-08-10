@@ -128,8 +128,8 @@ pub enum NetbirdForwardingMode {
     /// [Experimental] Setup forwarding with `iptables` rules.
     ///
     /// This mode is known to have issues with ports other than 80/443 (don't ask me why).
-    /// 
-    /// **Important:** TLS termination is not supported with this mode. Use `Socat` or `SocatWithDns` 
+    ///
+    /// **Important:** TLS termination is not supported with this mode. Use `Socat` or `SocatWithDns`
     /// for TLS termination functionality.
     Iptables,
 
