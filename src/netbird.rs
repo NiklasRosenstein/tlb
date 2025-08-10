@@ -285,9 +285,9 @@ impl TunnelProvider for NetbirdConfig {
                     .publish(
                         &service.object_ref(&()),
                         EventType::Warning,
-                        "InvalidPortMapping".into(),
+                        "LaunchScriptError".into(),
                         Some(err.to_string()),
-                        "PortMapping".into(),
+                        "Reconcile".into(),
                     )
                     .await?;
                 return Ok(());
