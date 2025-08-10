@@ -130,13 +130,20 @@ fn get_netbird_launch_script(
                 }
                 NetbirdForwardingMode::Socat => {
                     let listen_spec = if mapping.listen_tls {
-                        format!("openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", mapping.listen_port)
+                        format!(
+                            "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
+                            mapping.listen_port
+                        )
                     } else {
                         format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
                     };
 
                     let target_spec = if mapping.service_tls {
-                        let verify = if mapping.service_tls_verify { "verify=1" } else { "verify=0" };
+                        let verify = if mapping.service_tls_verify {
+                            "verify=1"
+                        } else {
+                            "verify=0"
+                        };
                         format!("OPENSSL:{service_ip}:{target_port},{verify}")
                     } else {
                         format!("{protocol_upper}:{service_ip}:{target_port}")
@@ -146,13 +153,20 @@ fn get_netbird_launch_script(
                 }
                 NetbirdForwardingMode::SocatWithDns => {
                     let listen_spec = if mapping.listen_tls {
-                        format!("openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", mapping.listen_port)
+                        format!(
+                            "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
+                            mapping.listen_port
+                        )
                     } else {
                         format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
                     };
 
                     let target_spec = if mapping.service_tls {
-                        let verify = if mapping.service_tls_verify { "verify=1" } else { "verify=0" };
+                        let verify = if mapping.service_tls_verify {
+                            "verify=1"
+                        } else {
+                            "verify=0"
+                        };
                         format!("OPENSSL:{service_name}.{service_namespace}:{target_port},{verify}")
                     } else {
                         format!("{protocol_upper}:{service_name}.{service_namespace}:{target_port}")
@@ -354,10 +368,7 @@ impl TunnelProvider for NetbirdConfig {
                             &service.object_ref(&()),
                             EventType::Warning,
                             "InvalidPortMapping".into(),
-                            Some(format!(
-                                "Invalid port mapping configuration: {}",
-                                err
-                            )),
+                            Some(format!("Invalid port mapping configuration: {}", err)),
                             "Reconcile".into(),
                         )
                         .await?;
@@ -588,7 +599,8 @@ impl TunnelProvider for NetbirdConfig {
         }];
 
         // Check if TLS is used in any port mappings to determine if TLS secret should be mounted
-        let needs_tls_secret = port_mappings.as_ref()
+        let needs_tls_secret = port_mappings
+            .as_ref()
             .map(|mappings| mappings.iter().any(|m| m.listen_tls || m.service_tls))
             .unwrap_or(false);
 
@@ -622,7 +634,8 @@ impl TunnelProvider for NetbirdConfig {
                         "TLSConfigurationError".into(),
                         Some(
                             "Port mapping configuration uses TLS but no 'tlb.io/tls-secret-name' annotation is set. \
-                            TLS termination requires a secret containing the TLS certificate and key.".to_string()
+                            TLS termination requires a secret containing the TLS certificate and key."
+                                .to_string(),
                         ),
                         "Reconcile".into(),
                     )

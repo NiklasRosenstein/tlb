@@ -113,7 +113,10 @@ impl PortMapping {
     pub fn parse(s: &str) -> Result<Self, String> {
         let parts: Vec<&str> = s.split(':').collect();
         if parts.len() != 2 {
-            return Err(format!("Invalid port mapping format: '{}'. Expected 'listen-port:service-port'", s));
+            return Err(format!(
+                "Invalid port mapping format: '{}'. Expected 'listen-port:service-port'",
+                s
+            ));
         }
 
         let (listen_port, listen_tls) = Self::parse_listen_part(parts[0])?;
@@ -130,12 +133,12 @@ impl PortMapping {
 
     fn parse_listen_part(s: &str) -> Result<(u16, bool), String> {
         if let Some(port_str) = s.strip_suffix("/tls") {
-            let port = port_str.parse::<u16>()
+            let port = port_str
+                .parse::<u16>()
                 .map_err(|_| format!("Invalid listen port: '{}'", port_str))?;
             Ok((port, true))
         } else {
-            let port = s.parse::<u16>()
-                .map_err(|_| format!("Invalid listen port: '{}'", s))?;
+            let port = s.parse::<u16>().map_err(|_| format!("Invalid listen port: '{}'", s))?;
             Ok((port, false))
         }
     }

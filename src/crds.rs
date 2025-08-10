@@ -138,7 +138,7 @@ pub enum NetbirdForwardingMode {
     /// only `apk` is supported.
     ///
     /// This mode is more stable and generally usable than [`NetbirdForwardingMode::Iptables`] at this time.
-    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with 
+    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with
     /// `tlb.io/tls-secret-name` for certificate configuration.
     Socat,
 
@@ -149,7 +149,7 @@ pub enum NetbirdForwardingMode {
     /// When DNS resolution works as expected in the Netbird Pod, this mode is preferred as it allows for the
     /// Service IP to change without having to update the Deployment and recreate the Pod (causing a churn of the
     /// LoadBalancer IP).
-    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with 
+    /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with
     /// `tlb.io/tls-secret-name` for certificate configuration.
     SocatWithDns,
 }

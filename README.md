@@ -60,15 +60,15 @@ spec:
 
 Configure your tunnels using these Service annotations:
 
-| Annotation               | Description                              | Cloudflare             | NetBird                      | Example                                  |
-| ------------------------ | ---------------------------------------- | ---------------------- | ---------------------------- | ---------------------------------------- |
-| `tlb.io/dns`             | Comma-separated DNS names for the tunnel | ✅ Auto CNAME creation | ✅ Sets load balancer status | `"app.example.com,api.example.com"`      |
-| `tlb.io/protocol`        | Protocol mapping for traffic forwarding  | ✅ Per-port or global  | ❌ Not used                  | `"80:http,22:ssh,3389:rdp"` or `"https"` |
-| `tlb.io/replicas`        | Number of tunnel replicas for HA         | ✅ Supported           | ✅ Supported                 | `"3"`                                    |
-| `tlb.io/topology-key`    | Topology key for spreading replicas      | ✅ Supported           | ✅ Supported                 | `"topology.kubernetes.io/zone"`          |
-| `tlb.io/node-selector`   | Node labels for tunnel placement         | ✅ Supported           | ✅ Supported                 | `"zone=us-west,type=worker"`             |
+| Annotation               | Description                              | Cloudflare             | NetBird                      | Example                                          |
+| ------------------------ | ---------------------------------------- | ---------------------- | ---------------------------- | ------------------------------------------------ |
+| `tlb.io/dns`             | Comma-separated DNS names for the tunnel | ✅ Auto CNAME creation | ✅ Sets load balancer status | `"app.example.com,api.example.com"`              |
+| `tlb.io/protocol`        | Protocol mapping for traffic forwarding  | ✅ Per-port or global  | ❌ Not used                  | `"80:http,22:ssh,3389:rdp"` or `"https"`         |
+| `tlb.io/replicas`        | Number of tunnel replicas for HA         | ✅ Supported           | ✅ Supported                 | `"3"`                                            |
+| `tlb.io/topology-key`    | Topology key for spreading replicas      | ✅ Supported           | ✅ Supported                 | `"topology.kubernetes.io/zone"`                  |
+| `tlb.io/node-selector`   | Node labels for tunnel placement         | ✅ Supported           | ✅ Supported                 | `"zone=us-west,type=worker"`                     |
 | `tlb.io/map-ports`       | Advanced port mapping with TLS support   | ❌ Not supported       | ✅ Supported                 | `"443/tls:http"` or `"80:8080,443/tls:8443/tls"` |
-| `tlb.io/tls-secret-name` | TLS certificate secret for termination   | ❌ Not supported       | ✅ Supported                 | `"my-tls-secret"`                        |
+| `tlb.io/tls-secret-name` | TLS certificate secret for termination   | ❌ Not supported       | ✅ Supported                 | `"my-tls-secret"`                                |
 
 ### Annotation Details
 
@@ -114,8 +114,9 @@ Configure your tunnels using these Service annotations:
 - **Multiple mappings**: Comma-separated entries, whitespace ignored
 - **Examples**:
   - `"80:http"` - Listen on port 80, forward to service port named "http"
-  - `"443/tls:http"` - Listen on port 443 with TLS termination, forward to service port named "http" 
-  - `"443/tls:5001/tls-no-verify"` - Listen on port 443 with TLS termination, forward to service port 5001 with TLS but no certificate verification
+  - `"443/tls:http"` - Listen on port 443 with TLS termination, forward to service port named "http"
+  - `"443/tls:5001/tls-no-verify"` - Listen on port 443 with TLS termination, forward to service port 5001 with TLS but
+    no certificate verification
   - `"80:8080, 443/tls:8443/tls"` - Multiple mappings for HTTP and HTTPS services
 
 #### `tlb.io/tls-secret-name` (NetBird only)
@@ -128,14 +129,16 @@ Configure your tunnels using these Service annotations:
 
 ## 🔒 TLS Termination (NetBird)
 
-NetBird provider supports flexible TLS termination using socat with certificates stored in Kubernetes secrets. This allows you to:
+NetBird provider supports flexible TLS termination using socat with certificates stored in Kubernetes secrets. This
+allows you to:
 
 - Terminate TLS at the tunnel edge using your own certificates
-- Forward decrypted traffic to HTTP services  
+- Forward decrypted traffic to HTTP services
 - Support HTTPS services with certificate management in Kubernetes
 - Configure complex port mappings with mixed TLS/non-TLS backends
 
-**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not supported with the `Iptables` forwarding mode.
+**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not
+supported with the `Iptables` forwarding mode.
 
 ### TLS Termination Example
 
@@ -189,35 +192,43 @@ spec:
 ### Port Mapping Examples
 
 **Simple TLS termination:**
+
 ```yaml
 annotations:
   tlb.io/map-ports: "443/tls:http"
   tlb.io/tls-secret-name: my-tls-secret
 ```
+
 Listens on port 443 with TLS termination, forwards to service's "http" port.
 
 **Multiple services with mixed TLS:**
+
 ```yaml
 annotations:
   tlb.io/map-ports: "80:8080, 443/tls:8080"
   tlb.io/tls-secret-name: my-tls-secret
 ```
+
 HTTP on port 80 and HTTPS on port 443, both forwarding to service port 8080.
 
 **TLS-to-TLS passthrough:**
+
 ```yaml
 annotations:
   tlb.io/map-ports: "443/tls:8443/tls"
   tlb.io/tls-secret-name: my-tls-secret
 ```
+
 TLS termination on port 443, re-encrypted connection to service port 8443.
 
 **TLS-to-TLS without verification:**
+
 ```yaml
 annotations:
   tlb.io/map-ports: "443/tls:8443/tls-no-verify"
   tlb.io/tls-secret-name: my-tls-secret
 ```
+
 TLS termination on port 443, re-encrypted connection to service port 8443 without certificate verification.
 
 ### How TLS Termination Works
