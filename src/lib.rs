@@ -167,3 +167,40 @@ pub async fn get_secret_value(
         secret_ref.name, secret_ref.key
     ))
 }
+
+/// Creates pod affinity rules to prefer scheduling tunnel pods on nodes where target service pods are running.
+/// This improves locality between tunnel pods and the services they proxy to.
+pub fn build_pod_affinity_for_service(service: &Service) -> Option<k8s_openapi::api::core::v1::PodAffinity> {
+    use k8s_openapi::api::core::v1::{PodAffinity, PodAffinityTerm, WeightedPodAffinityTerm};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+
+    // Extract the selector from the service spec
+    let selector = service.spec.as_ref()?.selector.as_ref()?;
+
+    if selector.is_empty() {
+        return None;
+    }
+
+    // Create a pod affinity term to prefer nodes where target service pods are running
+    let affinity_term = PodAffinityTerm {
+        label_selector: Some(LabelSelector {
+            match_labels: Some(selector.clone()),
+            match_expressions: None,
+        }),
+        topology_key: "kubernetes.io/hostname".to_string(),
+        namespace_selector: None,
+        namespaces: None,
+        match_label_keys: None,
+        mismatch_label_keys: None,
+    };
+
+    // Use preferred affinity so it's a preference, not a hard requirement
+    // This allows tunnel pods to still be scheduled even if target pods are not available
+    Some(PodAffinity {
+        preferred_during_scheduling_ignored_during_execution: Some(vec![WeightedPodAffinityTerm {
+            weight: 100, // High weight to strongly prefer co-location
+            pod_affinity_term: affinity_term,
+        }]),
+        required_during_scheduling_ignored_during_execution: None,
+    })
+}

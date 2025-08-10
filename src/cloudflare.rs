@@ -814,6 +814,12 @@ impl TunnelProvider for CloudflareConfig {
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
+                        affinity: crate::build_pod_affinity_for_service(service).map(|pod_affinity| {
+                            k8s_openapi::api::core::v1::Affinity {
+                                pod_affinity: Some(pod_affinity),
+                                ..Default::default()
+                            }
+                        }),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
