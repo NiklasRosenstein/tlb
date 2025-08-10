@@ -37,6 +37,7 @@ rules:
     verbs:
       - get
       - list
+      - patch # for annotations and finalizer
   - apiGroups: [""]
     resources:
       - services/status
