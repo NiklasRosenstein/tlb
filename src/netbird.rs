@@ -7,7 +7,7 @@ use k8s_openapi::{
         core::v1::{
             Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
             LoadBalancerIngress, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec,
-            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
+            Secret, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
             VolumeResourceRequirements,
         },
     },
@@ -31,7 +31,7 @@ use tokio::{
 
 use crate::{
     Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{NetbirdAnnounceType, NetbirdConfig, NetbirdForwardingMode},
+    crds::{NetbirdAnnounceType, NetbirdConfig},
     simpleevent::SimpleEventRecorder,
 };
 
@@ -39,6 +39,34 @@ const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
 pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=warn";
+
+/// Resolves a port mapping to actual port number and protocol
+fn resolve_port_mapping(mapping: &crate::PortMapping, ports: &[ServicePort]) -> Result<(i32, String)> {
+    if let Ok(port_num) = mapping.service_port.parse::<i32>() {
+        // Port specified by number - find matching port for protocol
+        let service_port = ports.iter().find(|p| p.port == port_num);
+        let protocol = service_port
+            .and_then(|p| p.protocol.as_ref())
+            .unwrap_or(&"TCP".to_string())
+            .to_lowercase();
+        Ok((port_num, protocol))
+    } else {
+        // Look up port by name
+        if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
+            let protocol = service_port
+                .protocol
+                .as_ref()
+                .unwrap_or(&"TCP".to_string())
+                .to_lowercase();
+            Ok((service_port.port, protocol))
+        } else {
+            Err(Error::ConfigError(format!(
+                "Port mapping references unknown service port '{}'",
+                mapping.service_port
+            )))
+        }
+    }
+}
 
 /// We prefer to expose the Netbird tunnel using the IP address of the Netbird peer, as this will work in most cases.
 /// Using the DNS name instead will require that the DNS server can resolve the Netbird domain, which is not always
@@ -49,80 +77,66 @@ const DEFAULT_ANNOUNCE_TYPE: NetbirdAnnounceType = NetbirdAnnounceType::IP;
 pub const NETBIRD_PEER_IP_PORT: u16 = 15411;
 
 ///
-/// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
+/// Generates a shell script that sets up port forwarding using socat for traffic coming in to the Netbird interface
 /// and launches the Netbird service.
 ///
 #[allow(clippy::too_many_arguments)]
 fn get_netbird_launch_script(
-    forwarding_mode: NetbirdForwardingMode,
     service_ip: String,
-    service_name: String,
-    service_namespace: String,
-    cluster_iface: String,
+    _service_name: String,
+    _service_namespace: String,
+    _cluster_iface: String,
     netbird_iface: String,
     up_command: String,
     ports: &[ServicePort],
-) -> String {
+    port_mappings: Option<Vec<crate::PortMapping>>,
+) -> Result<String> {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
-    match forwarding_mode {
-        NetbirdForwardingMode::Iptables => {
-            // Install iptables if it's not already installed.
-            launch_script.push("if ! command iptables >/dev/null; then apk add --no-cache iptables; fi".to_owned());
+    // Install socat if it's not already installed.
+    launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
+
+    if let Some(mappings) = port_mappings {
+        // Use custom port mappings
+        for mapping in mappings {
+            // Resolve service port to actual port number and protocol
+            let (target_port, protocol) = resolve_port_mapping(&mapping, ports)?;
+
+            let listen_spec = if mapping.listen_tls {
+                format!(
+                    "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
+                    mapping.listen_port
+                )
+            } else {
+                format!("{protocol}-listen:{},fork,reuseaddr", mapping.listen_port)
+            };
+
+            let target_spec = if mapping.service_tls {
+                let verify = if mapping.service_tls_verify {
+                    "verify=1"
+                } else {
+                    "verify=0"
+                };
+                format!("openssl:{service_ip}:{target_port},{verify}")
+            } else {
+                format!("{protocol}:{service_ip}:{target_port}")
+            };
+
+            launch_script.push(format!("socat {listen_spec} {target_spec} &"));
         }
-        NetbirdForwardingMode::Socat | NetbirdForwardingMode::SocatWithDns => {
-            // Install socat if it's not already installed.
-            launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
-        }
+    } else {
+        // Default behavior: direct 1:1 port mapping without TLS
+        ports.iter().for_each(|port| {
+            let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+            let port_num = port.port;
+
+            // Regular socat forwarding without TLS
+            launch_script.push(format!(
+                "socat {protocol}-listen:{port_num},fork,reuseaddr \
+                    {protocol}:{service_ip}:{port_num} &"
+            ));
+        });
     }
-
-    ports.iter().for_each(|port| {
-        let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
-        let protocol_upper = protocol.to_uppercase();
-        let port = port.port;
-
-        match forwarding_mode {
-            NetbirdForwardingMode::Iptables => {
-                // Accept new connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -p {protocol} -d {service_ip} --dport {port} -m conntrack \
-                        --ctstate NEW -j ACCEPT"
-                ));
-
-                // Accept established connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
-                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-
-                // NAT packets destined for the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                        -p {protocol} --dport {port} -j DNAT \
-                        --to-destination {service_ip}:{port}"
-                ));
-
-                launch_script.push(format!(
-                    "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-                ));
-            }
-            NetbirdForwardingMode::Socat => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_ip}:{port} &"
-            )),
-            NetbirdForwardingMode::SocatWithDns => launch_script.push(format!(
-                "socat {protocol_upper}-LISTEN:{port},fork,reuseaddr \
-                    {protocol_upper}:{service_name}.{service_namespace}:{port} &"
-            )),
-        }
-
-        launch_script.push("apk add socat".to_owned());
-    });
 
     // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
     launch_script.push(format!(
@@ -140,7 +154,7 @@ fn get_netbird_launch_script(
     ));
 
     launch_script.push(up_command);
-    launch_script.join("\n")
+    Ok(launch_script.join("\n"))
 }
 
 #[async_trait]
@@ -227,9 +241,29 @@ impl TunnelProvider for NetbirdConfig {
             .clone()
             .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
 
-        // Construct commands for setting up iptables in the Netbird pod.
-        let launch_script = get_netbird_launch_script(
-            self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat),
+        // Parse and validate port mappings
+        let port_mappings = if let Some(map_ports_str) = &options.map_ports {
+            match crate::PortMapping::parse_multiple(map_ports_str) {
+                Ok(mappings) => Some(mappings),
+                Err(err) => {
+                    ctx.events
+                        .publish(
+                            &service.object_ref(&()),
+                            EventType::Warning,
+                            "InvalidPortMapping".into(),
+                            Some(format!("Invalid port mapping configuration: {}", err)),
+                            "Reconcile".into(),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        // Construct commands for setting up port forwarding in the Netbird pod.
+        let launch_script = match get_netbird_launch_script(
             cluster_ip,
             svc_name.clone(),
             svc_namespace.clone(),
@@ -241,7 +275,22 @@ impl TunnelProvider for NetbirdConfig {
                 .clone()
                 .unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
             &ports,
-        );
+            port_mappings.clone(),
+        ) {
+            Ok(script) => script,
+            Err(err) => {
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        "LaunchScriptError".into(),
+                        Some(err.to_string()),
+                        "Reconcile".into(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
 
         let mut env = vec![
             EnvVar {
@@ -443,12 +492,97 @@ impl TunnelProvider for NetbirdConfig {
                 ..Default::default()
             }]);
         }
-        let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
-        container.volume_mounts = Some(vec![VolumeMount {
+        // Setup volumes and volume mounts
+        let mut volume_mounts = vec![VolumeMount {
             name: "netbird-data".into(),
             mount_path: "/var/lib/netbird".into(),
             ..Default::default()
-        }]);
+        }];
+
+        // Check if TLS is used in any port mappings to determine if TLS secret should be mounted
+        let needs_tls_secret = port_mappings
+            .as_ref()
+            .map(|mappings| mappings.iter().any(|m| m.listen_tls || m.service_tls))
+            .unwrap_or(false);
+
+        // Add TLS secret volume and mount if TLS is used in port mappings
+        let mut secret_resource_version: Option<String> = None;
+        if needs_tls_secret {
+            if let Some(tls_secret_name) = &options.tls_secret_name {
+                // Get the TLS secret to track its resourceVersion for pod rotation
+                let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), svc_namespace);
+                match secret_api.get_opt(tls_secret_name).await? {
+                    Some(secret) => {
+                        secret_resource_version = secret.metadata.resource_version.clone();
+                    }
+                    None => {
+                        ctx.events
+                            .publish(
+                                &service.object_ref(&()),
+                                EventType::Warning,
+                                "TLSSecretNotFound".into(),
+                                Some(format!(
+                                    "TLS secret '{}' not found in namespace '{}'",
+                                    tls_secret_name, svc_namespace
+                                )),
+                                "Reconcile".into(),
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                }
+
+                // Add TLS secret volume to the pod
+                let mut volumes = pod_template.spec.as_mut().unwrap().volumes.take().unwrap_or_default();
+                volumes.push(Volume {
+                    name: "tls-secret".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        secret_name: Some(tls_secret_name.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                pod_template.spec.as_mut().unwrap().volumes = Some(volumes);
+
+                // Add TLS secret volume mount
+                volume_mounts.push(VolumeMount {
+                    name: "tls-secret".into(),
+                    mount_path: "/tls".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                });
+            } else {
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        "TLSConfigurationError".into(),
+                        Some(
+                            "Port mapping configuration uses TLS but no 'tlb.io/tls-secret-name' annotation is set. \
+                            TLS termination requires a secret containing the TLS certificate and key."
+                                .to_string(),
+                        ),
+                        "Reconcile".into(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        // Apply volume mounts to the container
+        let container = pod_template.spec.as_mut().unwrap().containers.get_mut(0).unwrap();
+        container.volume_mounts = Some(volume_mounts);
+
+        // Add secret resource version to pod template annotations to trigger pod rotation when secret changes
+        if let Some(resource_version) = secret_resource_version {
+            let mut annotations = pod_template
+                .metadata
+                .as_ref()
+                .and_then(|m| m.annotations.clone())
+                .unwrap_or_default();
+            annotations.insert("controller.tlb.io/tls-secret-version".to_string(), resource_version);
+            pod_template.metadata.as_mut().unwrap().annotations = Some(annotations);
+        }
 
         statefulset_spec.template = pod_template;
 
@@ -742,4 +876,207 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
 
     eprintln!("[peer-ip-server] Found {} Netbird peer IPs", peer_ips.len());
     Ok(peer_ips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::ServicePort;
+
+    #[test]
+    fn test_port_mapping_parsing() {
+        // Test valid mappings
+        let mapping = crate::PortMapping::parse("443/tls:8080").unwrap();
+        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_tls, true);
+        assert_eq!(mapping.service_port, "8080");
+        assert_eq!(mapping.service_tls, false);
+        assert_eq!(mapping.service_tls_verify, true);
+
+        let mapping = crate::PortMapping::parse("80:http").unwrap();
+        assert_eq!(mapping.listen_port, 80);
+        assert_eq!(mapping.listen_tls, false);
+        assert_eq!(mapping.service_port, "http");
+        assert_eq!(mapping.service_tls, false);
+        assert_eq!(mapping.service_tls_verify, true);
+
+        let mapping = crate::PortMapping::parse("443/tls:5001/tls-no-verify").unwrap();
+        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_tls, true);
+        assert_eq!(mapping.service_port, "5001");
+        assert_eq!(mapping.service_tls, true);
+        assert_eq!(mapping.service_tls_verify, false);
+
+        // Test multiple mappings
+        let mappings = crate::PortMapping::parse_multiple("80:http, 443/tls:https").unwrap();
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].listen_port, 80);
+        assert_eq!(mappings[1].listen_port, 443);
+        assert_eq!(mappings[1].listen_tls, true);
+    }
+
+    #[test]
+    fn test_tls_socat_command_generation_with_port_mapping() {
+        let ports = vec![ServicePort {
+            name: Some("https".to_string()),
+            port: 443,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "443".to_string(),
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
+        let script = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        )
+        .unwrap();
+
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("cert=/tls/tls.crt"));
+        assert!(script.contains("key=/tls/tls.key"));
+        assert!(script.contains("verify=0"));
+        assert!(script.contains("tcp:10.0.0.1:443"));
+    }
+
+    #[test]
+    fn test_tls_443_to_80_forwarding_with_port_mapping() {
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "http".to_string(),
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
+        let script = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        )
+        .unwrap();
+
+        // Should create TLS termination on 443 forwarding to port 80 (resolved from "http" port name)
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("tcp:10.0.0.1:80"));
+    }
+
+    #[test]
+    fn test_service_to_service_tls() {
+        let ports = vec![ServicePort {
+            name: Some("https".to_string()),
+            port: 5001,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "5001".to_string(),
+            service_tls: true,
+            service_tls_verify: false,
+        }]);
+
+        let script = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        )
+        .unwrap();
+
+        // Should create TLS termination on 443 connecting to TLS service on 5001 without verification
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("openssl:10.0.0.1:5001,verify=0"));
+    }
+
+    #[test]
+    fn test_regular_socat_without_port_mappings() {
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let script = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            None, // No port mappings - should use default 1:1 mapping
+        )
+        .unwrap();
+
+        // Should use regular TCP socat, not openssl-listen
+        assert!(script.contains("tcp-listen:80"));
+        assert!(!script.contains("openssl-listen"));
+        assert!(!script.contains("cert="));
+    }
+
+    #[test]
+    fn test_invalid_port_mapping_returns_error() {
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "invalid-port".to_string(), // This port doesn't exist
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
+        let result = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        );
+
+        // Should return an error for invalid port mapping
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("Port mapping references unknown service port 'invalid-port'"));
+    }
 }

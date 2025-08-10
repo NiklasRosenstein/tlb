@@ -1,0 +1,216 @@
+---
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: netbird
+spec:
+  netbird:
+    managementUrl: https://netbird.example.com
+    setupKeyRef:
+      name: netbird-setup-key
+      namespace: default
+      key: setupKey
+    storageClass: standard
+    # TLS termination requires Socat or SocatWithDns forwarding mode
+    forwardingMode: Socat
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: netbird-setup-key
+type: Opaque
+stringData:
+  setupKey: 76A5AE81-1E3D-4207-9939-82EC1A97BF0F
+
+---
+# TLS certificate secret for termination
+apiVersion: v1
+kind: Secret
+metadata:
+  name: my-tls-secret
+type: kubernetes.io/tls
+data:
+  # Base64 encoded certificate and private key
+  # For testing purposes - in production, use real certificates
+  tls.crt: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t
+  tls.key: LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t
+
+---
+# Example 1: TLS termination on 443 with explicit port mapping
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  annotations:
+    tlb.io/map-ports: "443/tls:https"
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: my-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: http
+      protocol: TCP
+      name: http
+    - port: 443
+      targetPort: https
+      protocol: TCP
+      name: https
+  selector:
+    app: my-app
+
+---
+# Example 2: TLS termination on 443 forwarding to HTTP port 80
+apiVersion: v1
+kind: Service
+metadata:
+  name: http-service-with-tls
+  annotations:
+    tlb.io/map-ports: "443/tls:http"
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: http-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: http-app
+
+---
+# Example 3: Multiple port mappings with mixed TLS and non-TLS
+apiVersion: v1
+kind: Service
+metadata:
+  name: mixed-service
+  annotations:
+    tlb.io/map-ports: "80:http, 443/tls:http"
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: mixed-service.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: mixed-app
+
+---
+# Example 4: TLS-to-TLS with verification disabled
+apiVersion: v1
+kind: Service
+metadata:
+  name: tls-to-tls-service
+  annotations:
+    tlb.io/map-ports: "443/tls:8443/tls-no-verify"
+    tlb.io/tls-secret-name: my-tls-secret
+    external-dns.alpha.kubernetes.io/hostname: tls-to-tls.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/netbird
+  ports:
+    - port: 8443
+      targetPort: 8443
+      protocol: TCP
+      name: https
+  selector:
+    app: tls-app
+
+---
+# Deployment for the examples
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: http-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: http-app
+  template:
+    metadata:
+      labels:
+        app: http-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: http
+              containerPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mixed-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mixed-app
+  template:
+    metadata:
+      labels:
+        app: mixed-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: http
+              containerPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tls-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tls-app
+  template:
+    metadata:
+      labels:
+        app: tls-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          ports:
+            - name: https
+              containerPort: 8443
