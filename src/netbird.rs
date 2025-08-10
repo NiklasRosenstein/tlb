@@ -575,7 +575,7 @@ impl TunnelProvider for NetbirdConfig {
                 .as_ref()
                 .and_then(|m| m.annotations.clone())
                 .unwrap_or_default();
-            annotations.insert("tlb.io/tls-secret-version".to_string(), resource_version);
+            annotations.insert("controller.tlb.io/tls-secret-version".to_string(), resource_version);
             pod_template.metadata.as_mut().unwrap().annotations = Some(annotations);
         }
 

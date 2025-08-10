@@ -432,6 +432,7 @@ The controller adds these labels to resources it manages:
 | `controller.tlb.io/for-tunnel-class`    | Links resources to TunnelClass                                | All tunnel resources |
 | `controller.tlb.io/provider`            | Identifies the tunnel provider                                | All tunnel resources |
 | `controller.tlb.io/secret-version`      | Triggers pod rotation on credential updates                   | Pod templates        |
+| `controller.tlb.io/tls-secret-version`  | Triggers pod rotation on TLS certificate updates             | Pod templates        |
 | `controller.tlb.io/last-observed-state` | Stores last observed state about a resource to detect changes | `Service`            |
 
 ### Finalizers for Safe Cleanup
