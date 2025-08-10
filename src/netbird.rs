@@ -40,6 +40,34 @@ const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
 pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=warn";
 
+/// Resolves a port mapping to actual port number and protocol
+fn resolve_port_mapping(mapping: &crate::PortMapping, ports: &[ServicePort]) -> Result<(i32, String)> {
+    if let Ok(port_num) = mapping.service_port.parse::<i32>() {
+        // Port specified by number - find matching port for protocol
+        let service_port = ports.iter().find(|p| p.port == port_num);
+        let protocol = service_port
+            .and_then(|p| p.protocol.as_ref())
+            .unwrap_or(&"TCP".to_string())
+            .to_lowercase();
+        Ok((port_num, protocol))
+    } else {
+        // Look up port by name
+        if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
+            let protocol = service_port
+                .protocol
+                .as_ref()
+                .unwrap_or(&"TCP".to_string())
+                .to_lowercase();
+            Ok((service_port.port, protocol))
+        } else {
+            Err(Error::ConfigError(format!(
+                "Port mapping references unknown service port '{}'",
+                mapping.service_port
+            )))
+        }
+    }
+}
+
 /// We prefer to expose the Netbird tunnel using the IP address of the Netbird peer, as this will work in most cases.
 /// Using the DNS name instead will require that the DNS server can resolve the Netbird domain, which is not always
 /// the case, especially when registering a CNAME entry for the Netbird tunnel in a public DNS server.
@@ -62,7 +90,7 @@ fn get_netbird_launch_script(
     up_command: String,
     ports: &[ServicePort],
     port_mappings: Option<Vec<crate::PortMapping>>,
-) -> String {
+) -> Result<String> {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
     // Install socat if it's not already installed.
@@ -72,28 +100,7 @@ fn get_netbird_launch_script(
         // Use custom port mappings
         for mapping in mappings {
             // Resolve service port to actual port number and protocol
-            let (target_port, protocol) = if let Ok(port_num) = mapping.service_port.parse::<i32>() {
-                // Port specified by number - find matching port for protocol
-                let service_port = ports.iter().find(|p| p.port == port_num);
-                let protocol = service_port
-                    .and_then(|p| p.protocol.as_ref())
-                    .unwrap_or(&"TCP".to_string())
-                    .to_lowercase();
-                (port_num, protocol)
-            } else {
-                // Look up port by name
-                if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
-                    let protocol = service_port
-                        .protocol
-                        .as_ref()
-                        .unwrap_or(&"TCP".to_string())
-                        .to_lowercase();
-                    (service_port.port, protocol)
-                } else {
-                    // Skip this mapping if port name not found
-                    continue;
-                }
-            };
+            let (target_port, protocol) = resolve_port_mapping(&mapping, ports)?;
             let protocol_upper = protocol.to_uppercase();
 
             let listen_spec = if mapping.listen_tls {
@@ -149,7 +156,7 @@ fn get_netbird_launch_script(
     ));
 
     launch_script.push(up_command);
-    launch_script.join("\n")
+    Ok(launch_script.join("\n"))
 }
 
 #[async_trait]
@@ -258,7 +265,7 @@ impl TunnelProvider for NetbirdConfig {
         };
 
         // Construct commands for setting up port forwarding in the Netbird pod.
-        let launch_script = get_netbird_launch_script(
+        let launch_script = match get_netbird_launch_script(
             cluster_ip,
             svc_name.clone(),
             svc_namespace.clone(),
@@ -271,7 +278,21 @@ impl TunnelProvider for NetbirdConfig {
                 .unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
             &ports,
             port_mappings.clone(),
-        );
+        ) {
+            Ok(script) => script,
+            Err(err) => {
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        "InvalidPortMapping".into(),
+                        Some(err.to_string()),
+                        "PortMapping".into(),
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
 
         let mut env = vec![
             EnvVar {
@@ -882,7 +903,8 @@ mod tests {
             "netbird up".to_string(),
             &ports,
             port_mappings,
-        );
+        )
+        .unwrap();
 
         assert!(script.contains("openssl-listen:443"));
         assert!(script.contains("cert=/tls/tls.crt"));
@@ -917,7 +939,8 @@ mod tests {
             "netbird up".to_string(),
             &ports,
             port_mappings,
-        );
+        )
+        .unwrap();
 
         // Should create TLS termination on 443 forwarding to port 80 (resolved from "http" port name)
         assert!(script.contains("openssl-listen:443"));
@@ -950,7 +973,8 @@ mod tests {
             "netbird up".to_string(),
             &ports,
             port_mappings,
-        );
+        )
+        .unwrap();
 
         // Should create TLS termination on 443 connecting to TLS service on 5001 without verification
         assert!(script.contains("openssl-listen:443"));
@@ -975,11 +999,46 @@ mod tests {
             "netbird up".to_string(),
             &ports,
             None, // No port mappings - should use default 1:1 mapping
-        );
+        )
+        .unwrap();
 
         // Should use regular TCP socat, not openssl-listen
         assert!(script.contains("TCP-LISTEN:80"));
         assert!(!script.contains("openssl-listen"));
         assert!(!script.contains("cert="));
+    }
+
+    #[test]
+    fn test_invalid_port_mapping_returns_error() {
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "invalid-port".to_string(), // This port doesn't exist
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
+        let result = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        );
+
+        // Should return an error for invalid port mapping
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("Port mapping references unknown service port 'invalid-port'"));
     }
 }
