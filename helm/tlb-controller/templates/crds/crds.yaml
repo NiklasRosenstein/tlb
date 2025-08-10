@@ -83,14 +83,6 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
-                  forwardingMode:
-                    description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
-                    enum:
-                    - Iptables
-                    - Socat
-                    - SocatWithDns
-                    nullable: true
-                    type: string
                   image:
                     description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the controller.
                     nullable: true
@@ -230,14 +222,6 @@ spec:
                     type: string
                   clusterInterface:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
-                    nullable: true
-                    type: string
-                  forwardingMode:
-                    description: How forwarding is implemented in the Netbird tunnel Pod. Defaults to [`NetbirdForwardingMode::Socat`].
-                    enum:
-                    - Iptables
-                    - Socat
-                    - SocatWithDns
                     nullable: true
                     type: string
                   image:
