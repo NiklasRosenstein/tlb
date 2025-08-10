@@ -62,8 +62,7 @@ fn get_netbird_launch_script(
     netbird_iface: String,
     up_command: String,
     ports: &[ServicePort],
-    tls_secret_name: Option<&String>,
-    tls_port: Option<u16>,
+    port_mappings: Option<Vec<crate::PortMapping>>,
 ) -> String {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
@@ -78,135 +77,144 @@ fn get_netbird_launch_script(
         }
     }
 
-    ports.iter().for_each(|port| {
-        let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
-        let protocol_upper = protocol.to_uppercase();
-        let port_num = port.port;
+    if let Some(mappings) = port_mappings {
+        // Use custom port mappings
+        for mapping in mappings {
+            let protocol = "tcp"; // Port mappings currently only support TCP
+            let protocol_upper = "TCP";
 
-        // Determine TLS termination logic for this port
-        let should_use_tls = if let Some(tls_port) = tls_port {
-            // Explicit TLS port specified - use TLS only for that port
-            port_num == tls_port as i32
-        } else if tls_secret_name.is_some() {
-            // TLS secret specified but no explicit port - apply default logic
-            if port_num == 443 {
-                // Port 443 gets TLS termination
-                true
-            } else if port_num == 80 && !ports.iter().any(|p| p.port == 443) {
-                // Port 80 gets TLS termination only if there's no port 443
-                false // We'll handle 443->80 forwarding separately below
+            // Resolve service port to actual port number
+            let target_port = if let Ok(port_num) = mapping.service_port.parse::<i32>() {
+                port_num
             } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        match forwarding_mode {
-            NetbirdForwardingMode::Iptables => {
-                // Accept new connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -p {protocol} -d {service_ip} --dport {port_num} -m conntrack \
-                        --ctstate NEW -j ACCEPT"
-                ));
-
-                // Accept established connections to the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-                launch_script.push(format!(
-                    "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
-                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                ));
-
-                // NAT packets destined for the cluster IP and port.
-                launch_script.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                        -p {protocol} --dport {port_num} -j DNAT \
-                        --to-destination {service_ip}:{port_num}"
-                ));
-
-                launch_script.push(format!(
-                    "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-                ));
-            }
-            NetbirdForwardingMode::Socat => {
-                if should_use_tls && protocol.to_lowercase() == "tcp" {
-                    // TLS termination with socat
-                    launch_script.push(format!(
-                        "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
-                            TCP:{service_ip}:{port_num} &"
-                    ));
+                // Look up port by name
+                if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
+                    service_port.port
                 } else {
-                    // Regular socat forwarding
+                    // Skip this mapping if port name not found
+                    continue;
+                }
+            };
+
+            match forwarding_mode {
+                NetbirdForwardingMode::Iptables => {
+                    // Iptables mode doesn't support TLS, so ignore TLS flags
+                    // Accept new connections to the cluster IP and port.
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                            -p {protocol} -d {service_ip} --dport {target_port} -m conntrack \
+                            --ctstate NEW -j ACCEPT"
+                    ));
+
+                    // Accept established connections to the cluster IP and port.
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                    ));
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
+                            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                    ));
+
+                    // NAT packets destined for the listen port to target port.
+                    launch_script.push(format!(
+                        "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
+                            -p {protocol} --dport {} -j DNAT \
+                            --to-destination {service_ip}:{target_port}",
+                        mapping.listen_port
+                    ));
+
+                    launch_script.push(format!(
+                        "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
+                    ));
+                }
+                NetbirdForwardingMode::Socat => {
+                    let listen_spec = if mapping.listen_tls {
+                        format!("openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", mapping.listen_port)
+                    } else {
+                        format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
+                    };
+
+                    let target_spec = if mapping.service_tls {
+                        let verify = if mapping.service_tls_verify { "verify=1" } else { "verify=0" };
+                        format!("OPENSSL:{service_ip}:{target_port},{verify}")
+                    } else {
+                        format!("{protocol_upper}:{service_ip}:{target_port}")
+                    };
+
+                    launch_script.push(format!("{listen_spec} {target_spec} &"));
+                }
+                NetbirdForwardingMode::SocatWithDns => {
+                    let listen_spec = if mapping.listen_tls {
+                        format!("openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0", mapping.listen_port)
+                    } else {
+                        format!("{protocol_upper}-LISTEN:{},fork,reuseaddr", mapping.listen_port)
+                    };
+
+                    let target_spec = if mapping.service_tls {
+                        let verify = if mapping.service_tls_verify { "verify=1" } else { "verify=0" };
+                        format!("OPENSSL:{service_name}.{service_namespace}:{target_port},{verify}")
+                    } else {
+                        format!("{protocol_upper}:{service_name}.{service_namespace}:{target_port}")
+                    };
+
+                    launch_script.push(format!("{listen_spec} {target_spec} &"));
+                }
+            }
+        }
+    } else {
+        // Default behavior: direct 1:1 port mapping without TLS
+        ports.iter().for_each(|port| {
+            let protocol = port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+            let protocol_upper = protocol.to_uppercase();
+            let port_num = port.port;
+
+            match forwarding_mode {
+                NetbirdForwardingMode::Iptables => {
+                    // Accept new connections to the cluster IP and port.
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                            -p {protocol} -d {service_ip} --dport {port_num} -m conntrack \
+                            --ctstate NEW -j ACCEPT"
+                    ));
+
+                    // Accept established connections to the cluster IP and port.
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
+                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                    ));
+                    launch_script.push(format!(
+                        "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
+                            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+                    ));
+
+                    // NAT packets destined for the cluster IP and port.
+                    launch_script.push(format!(
+                        "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
+                            -p {protocol} --dport {port_num} -j DNAT \
+                            --to-destination {service_ip}:{port_num}"
+                    ));
+
+                    launch_script.push(format!(
+                        "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
+                    ));
+                }
+                NetbirdForwardingMode::Socat => {
+                    // Regular socat forwarding without TLS
                     launch_script.push(format!(
                         "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
                             {protocol_upper}:{service_ip}:{port_num} &"
                     ));
                 }
-            }
-            NetbirdForwardingMode::SocatWithDns => {
-                if should_use_tls && protocol.to_lowercase() == "tcp" {
-                    // TLS termination with socat using DNS
-                    launch_script.push(format!(
-                        "socat openssl-listen:{port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
-                            TCP:{service_name}.{service_namespace}:{port_num} &"
-                    ));
-                } else {
-                    // Regular socat forwarding with DNS
+                NetbirdForwardingMode::SocatWithDns => {
+                    // Regular socat forwarding with DNS without TLS
                     launch_script.push(format!(
                         "socat {protocol_upper}-LISTEN:{port_num},fork,reuseaddr \
                             {protocol_upper}:{service_name}.{service_namespace}:{port_num} &"
                     ));
                 }
             }
-        }
-    });
-
-    // Handle special case: TLS termination on 443 forwarding to 80 when service only has port 80
-    if tls_secret_name.is_some() && tls_port.is_none() {
-        // Check if we have port 80 but no port 443
-        let has_80 = ports.iter().any(|p| p.port == 80);
-        let has_443 = ports.iter().any(|p| p.port == 443);
-
-        if has_80 && !has_443 {
-            if let Some(port_80) = ports.iter().find(|p| p.port == 80) {
-                let protocol = port_80.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
-                if protocol == "tcp" {
-                    match forwarding_mode {
-                        NetbirdForwardingMode::Iptables => {
-                            // Add iptables rules for 443 -> 80 forwarding (no TLS support in iptables mode)
-                            launch_script.push(format!(
-                                "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                                    -p tcp -d {service_ip} --dport 80 -m conntrack \
-                                    --ctstate NEW -j ACCEPT"
-                            ));
-                            launch_script.push(format!(
-                                "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                                    -p tcp --dport 443 -j DNAT \
-                                    --to-destination {service_ip}:80"
-                            ));
-                        }
-                        NetbirdForwardingMode::Socat => {
-                            // TLS termination on 443 forwarding to HTTP on 80
-                            launch_script.push(format!(
-                                "socat openssl-listen:443,fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
-                                    TCP:{service_ip}:80 &"
-                            ));
-                        }
-                        NetbirdForwardingMode::SocatWithDns => {
-                            // TLS termination on 443 forwarding to HTTP on 80 using DNS
-                            launch_script.push(format!(
-                                "socat openssl-listen:443,fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0 \
-                                    TCP:{service_name}.{service_namespace}:80 &"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
+        });
     }
 
     // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
@@ -304,53 +312,55 @@ impl TunnelProvider for NetbirdConfig {
             .clone()
             .unwrap_or(DEFAULT_NETBIRD_INTERFACE.to_string());
 
-        // Validate TLS configuration and determine TLS port
+        // Parse and validate port mappings
         let forwarding_mode = self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat);
-        if let Some(tls_secret_name) = &options.tls_secret_name {
-            // Validate that TLS termination is only used with Socat modes
-            if forwarding_mode == NetbirdForwardingMode::Iptables {
-                ctx.events
-                    .publish(
-                        &service.object_ref(&()),
-                        EventType::Warning,
-                        "TLSConfigurationError".into(),
-                        Some(format!(
-                            "TLS termination is not supported with iptables forwarding mode. \
-                            TLS secret '{}' is configured but the NetBird forwarding mode is set to 'Iptables'. \
-                            TLS termination requires 'Socat' or 'SocatWithDns' forwarding mode.",
-                            tls_secret_name
-                        )),
-                        "Reconcile".into(),
-                    )
-                    .await?;
-                return Ok(());
-            }
-
-            if options.tls_port.is_none() {
-                // Apply default TLS port logic as per requirements
-                let has_443 = ports.iter().any(|p| p.port == 443);
-                let has_80 = ports.iter().any(|p| p.port == 80);
-
-                if !has_443 && !has_80 {
-                    // Error condition: neither 443 nor 80 are available and no explicit tls_port is set
+        let port_mappings = if let Some(map_ports_str) = &options.map_ports {
+            match crate::PortMapping::parse_multiple(map_ports_str) {
+                Ok(mappings) => {
+                    // Validate that TLS is only used with Socat modes
+                    if forwarding_mode == NetbirdForwardingMode::Iptables {
+                        let has_tls = mappings.iter().any(|m| m.listen_tls || m.service_tls);
+                        if has_tls {
+                            ctx.events
+                                .publish(
+                                    &service.object_ref(&()),
+                                    EventType::Warning,
+                                    "TLSConfigurationError".into(),
+                                    Some(format!(
+                                        "TLS termination is not supported with iptables forwarding mode. \
+                                        Port mapping '{}' contains TLS configuration but the NetBird forwarding mode is set to 'Iptables'. \
+                                        TLS termination requires 'Socat' or 'SocatWithDns' forwarding mode.",
+                                        map_ports_str
+                                    )),
+                                    "Reconcile".into(),
+                                )
+                                .await?;
+                            return Ok(());
+                        }
+                    }
+                    Some(mappings)
+                }
+                Err(err) => {
                     ctx.events
                         .publish(
                             &service.object_ref(&()),
                             EventType::Warning,
-                            "TLSConfigurationError".into(),
+                            "InvalidPortMapping".into(),
                             Some(format!(
-                                "TLS secret '{}' is configured but service has neither port 443 nor port 80, and no tlb.io/tls-port annotation is set. \
-                                TLS termination requires an explicit port annotation in this case.",
-                                tls_secret_name
+                                "Invalid port mapping configuration: {}",
+                                err
                             )),
                             "Reconcile".into(),
                         )
                         .await?;
+                    return Ok(());
                 }
             }
-        }
+        } else {
+            None
+        };
 
-        // Construct commands for setting up iptables in the Netbird pod.
+        // Construct commands for setting up port forwarding in the Netbird pod.
         let launch_script = get_netbird_launch_script(
             forwarding_mode,
             cluster_ip,
@@ -364,8 +374,7 @@ impl TunnelProvider for NetbirdConfig {
                 .clone()
                 .unwrap_or(DEFAULT_NETBIRD_UP_COMMAND.to_string()),
             &ports,
-            options.tls_secret_name.as_ref(),
-            options.tls_port,
+            port_mappings.clone(),
         );
 
         let mut env = vec![
@@ -568,27 +577,48 @@ impl TunnelProvider for NetbirdConfig {
             ..Default::default()
         }];
 
-        // Add TLS secret volume and mount if configured
-        if let Some(tls_secret_name) = &options.tls_secret_name {
-            // Add TLS secret volume to the pod
-            let mut volumes = pod_template.spec.as_mut().unwrap().volumes.take().unwrap_or_default();
-            volumes.push(Volume {
-                name: "tls-secret".into(),
-                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                    secret_name: Some(tls_secret_name.clone()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            });
-            pod_template.spec.as_mut().unwrap().volumes = Some(volumes);
+        // Check if TLS is used in any port mappings to determine if TLS secret should be mounted
+        let needs_tls_secret = port_mappings.as_ref()
+            .map(|mappings| mappings.iter().any(|m| m.listen_tls || m.service_tls))
+            .unwrap_or(false);
 
-            // Add TLS secret volume mount
-            volume_mounts.push(VolumeMount {
-                name: "tls-secret".into(),
-                mount_path: "/tls".into(),
-                read_only: Some(true),
-                ..Default::default()
-            });
+        // Add TLS secret volume and mount if TLS is used in port mappings
+        if needs_tls_secret {
+            if let Some(tls_secret_name) = &options.tls_secret_name {
+                // Add TLS secret volume to the pod
+                let mut volumes = pod_template.spec.as_mut().unwrap().volumes.take().unwrap_or_default();
+                volumes.push(Volume {
+                    name: "tls-secret".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        secret_name: Some(tls_secret_name.clone()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                });
+                pod_template.spec.as_mut().unwrap().volumes = Some(volumes);
+
+                // Add TLS secret volume mount
+                volume_mounts.push(VolumeMount {
+                    name: "tls-secret".into(),
+                    mount_path: "/tls".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                });
+            } else {
+                ctx.events
+                    .publish(
+                        &service.object_ref(&()),
+                        EventType::Warning,
+                        "TLSConfigurationError".into(),
+                        Some(
+                            "Port mapping configuration uses TLS but no 'tlb.io/tls-secret-name' annotation is set. \
+                            TLS termination requires a secret containing the TLS certificate and key.".to_string()
+                        ),
+                        "Reconcile".into(),
+                    )
+                    .await?;
+                return Ok(());
+            }
         }
 
         // Apply volume mounts to the container
@@ -891,7 +921,39 @@ mod tests {
     use k8s_openapi::api::core::v1::ServicePort;
 
     #[test]
-    fn test_tls_socat_command_generation() {
+    fn test_port_mapping_parsing() {
+        // Test valid mappings
+        let mapping = crate::PortMapping::parse("443/tls:8080").unwrap();
+        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_tls, true);
+        assert_eq!(mapping.service_port, "8080");
+        assert_eq!(mapping.service_tls, false);
+        assert_eq!(mapping.service_tls_verify, true);
+
+        let mapping = crate::PortMapping::parse("80:http").unwrap();
+        assert_eq!(mapping.listen_port, 80);
+        assert_eq!(mapping.listen_tls, false);
+        assert_eq!(mapping.service_port, "http");
+        assert_eq!(mapping.service_tls, false);
+        assert_eq!(mapping.service_tls_verify, true);
+
+        let mapping = crate::PortMapping::parse("443/tls:5001/tls-no-verify").unwrap();
+        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_tls, true);
+        assert_eq!(mapping.service_port, "5001");
+        assert_eq!(mapping.service_tls, true);
+        assert_eq!(mapping.service_tls_verify, false);
+
+        // Test multiple mappings
+        let mappings = crate::PortMapping::parse_multiple("80:http, 443/tls:https").unwrap();
+        assert_eq!(mappings.len(), 2);
+        assert_eq!(mappings[0].listen_port, 80);
+        assert_eq!(mappings[1].listen_port, 443);
+        assert_eq!(mappings[1].listen_tls, true);
+    }
+
+    #[test]
+    fn test_tls_socat_command_generation_with_port_mapping() {
         let ports = vec![ServicePort {
             name: Some("https".to_string()),
             port: 443,
@@ -899,6 +961,14 @@ mod tests {
             ..Default::default()
         }];
 
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "443".to_string(),
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Socat,
             "10.0.0.1".to_string(),
@@ -908,24 +978,32 @@ mod tests {
             "wt0".to_string(),
             "netbird up".to_string(),
             &ports,
-            Some(&"my-tls-secret".to_string()),
-            Some(443),
+            port_mappings,
         );
 
         assert!(script.contains("openssl-listen:443"));
         assert!(script.contains("cert=/tls/tls.crt"));
         assert!(script.contains("key=/tls/tls.key"));
         assert!(script.contains("verify=0"));
+        assert!(script.contains("TCP:10.0.0.1:443"));
     }
 
     #[test]
-    fn test_tls_443_to_80_forwarding() {
+    fn test_tls_443_to_80_forwarding_with_port_mapping() {
         let ports = vec![ServicePort {
             name: Some("http".to_string()),
             port: 80,
             protocol: Some("TCP".to_string()),
             ..Default::default()
         }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "http".to_string(),
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
 
         let script = get_netbird_launch_script(
             NetbirdForwardingMode::Socat,
@@ -936,17 +1014,50 @@ mod tests {
             "wt0".to_string(),
             "netbird up".to_string(),
             &ports,
-            Some(&"my-tls-secret".to_string()),
-            None, // No explicit TLS port, should default to 443->80
+            port_mappings,
         );
 
-        // Should create TLS termination on 443 forwarding to port 80
+        // Should create TLS termination on 443 forwarding to port 80 (resolved from "http" port name)
         assert!(script.contains("openssl-listen:443"));
         assert!(script.contains("TCP:10.0.0.1:80"));
     }
 
     #[test]
-    fn test_regular_socat_without_tls() {
+    fn test_service_to_service_tls() {
+        let ports = vec![ServicePort {
+            name: Some("https".to_string()),
+            port: 5001,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: 443,
+            listen_tls: true,
+            service_port: "5001".to_string(),
+            service_tls: true,
+            service_tls_verify: false,
+        }]);
+
+        let script = get_netbird_launch_script(
+            NetbirdForwardingMode::Socat,
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "default".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "netbird up".to_string(),
+            &ports,
+            port_mappings,
+        );
+
+        // Should create TLS termination on 443 connecting to TLS service on 5001 without verification
+        assert!(script.contains("openssl-listen:443"));
+        assert!(script.contains("OPENSSL:10.0.0.1:5001,verify=0"));
+    }
+
+    #[test]
+    fn test_regular_socat_without_port_mappings() {
         let ports = vec![ServicePort {
             name: Some("http".to_string()),
             port: 80,
@@ -963,8 +1074,7 @@ mod tests {
             "wt0".to_string(),
             "netbird up".to_string(),
             &ports,
-            None, // No TLS secret
-            None,
+            None, // No port mappings - should use default 1:1 mapping
         );
 
         // Should use regular TCP socat, not openssl-listen
@@ -974,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_iptables_mode_without_tls() {
+    fn test_iptables_mode_without_port_mappings() {
         let ports = vec![ServicePort {
             name: Some("http".to_string()),
             port: 80,
@@ -991,8 +1101,7 @@ mod tests {
             "wt0".to_string(),
             "netbird up".to_string(),
             &ports,
-            None, // No TLS secret
-            None,
+            None, // No port mappings
         );
 
         // Should use iptables, not socat

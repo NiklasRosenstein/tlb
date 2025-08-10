@@ -92,6 +92,74 @@ pub trait Reconcile<C> {
     async fn reconcile(&self, ctx: &C) -> Result<Action>;
 }
 
+/// Represents a single port mapping configuration
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortMapping {
+    /// Port that socat should listen on
+    pub listen_port: u16,
+    /// Whether to use TLS termination on the listen side (OPENSSL-LISTEN vs TCP-LISTEN)
+    pub listen_tls: bool,
+    /// Service port (either port number or port name) to forward traffic to
+    pub service_port: String,
+    /// Whether the service port uses TLS (OPENSSL vs TCP)
+    pub service_tls: bool,
+    /// Whether to verify TLS certificates when connecting to service (only relevant if service_tls is true)
+    pub service_tls_verify: bool,
+}
+
+impl PortMapping {
+    /// Parse a single port mapping from a string
+    /// Format: "(listen-port)[/tls]:(service-port)[/tls[-no-verify]]"
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid port mapping format: '{}'. Expected 'listen-port:service-port'", s));
+        }
+
+        let (listen_port, listen_tls) = Self::parse_listen_part(parts[0])?;
+        let (service_port, service_tls, service_tls_verify) = Self::parse_service_part(parts[1])?;
+
+        Ok(PortMapping {
+            listen_port,
+            listen_tls,
+            service_port,
+            service_tls,
+            service_tls_verify,
+        })
+    }
+
+    fn parse_listen_part(s: &str) -> Result<(u16, bool), String> {
+        if let Some(port_str) = s.strip_suffix("/tls") {
+            let port = port_str.parse::<u16>()
+                .map_err(|_| format!("Invalid listen port: '{}'", port_str))?;
+            Ok((port, true))
+        } else {
+            let port = s.parse::<u16>()
+                .map_err(|_| format!("Invalid listen port: '{}'", s))?;
+            Ok((port, false))
+        }
+    }
+
+    fn parse_service_part(s: &str) -> Result<(String, bool, bool), String> {
+        if let Some(port_str) = s.strip_suffix("/tls-no-verify") {
+            Ok((port_str.to_string(), true, false))
+        } else if let Some(port_str) = s.strip_suffix("/tls") {
+            Ok((port_str.to_string(), true, true))
+        } else {
+            Ok((s.to_string(), false, true))
+        }
+    }
+
+    /// Parse multiple port mappings from a comma-separated string
+    pub fn parse_multiple(s: &str) -> Result<Vec<Self>, String> {
+        s.split(',')
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(Self::parse)
+            .collect()
+    }
+}
+
 ///
 /// Configuration that can be specified as annotations on the Service object.
 ///
@@ -111,13 +179,15 @@ pub struct ServiceAnnotations {
     /// A comma-separated list of node labels to use as node selectors for the tunnel pods.
     pub node_selector: Option<String>,
 
-    /// Name of the Kubernetes secret containing TLS certificate for termination.
-    /// When specified, TLS termination will be performed using socat.
-    pub tls_secret_name: Option<String>,
+    /// Port mapping configuration for advanced forwarding and TLS termination.
+    /// Format: "(listen-port)[/tls]:(service-port)[/tls[-no-verify]]"
+    /// Multiple mappings can be comma-separated.
+    /// Examples: "80:http", "443/tls:http", "443/tls:5001/tls-no-verify"
+    pub map_ports: Option<String>,
 
-    /// Port to which TLS termination should be applied. Only considered when tls_secret_name is set.
-    /// If not set, defaults are applied based on service ports (443 if available, or 443->80 if only 80 is available).
-    pub tls_port: Option<u16>,
+    /// Name of the Kubernetes secret containing TLS certificate for termination.
+    /// Used when any port mapping specifies TLS termination.
+    pub tls_secret_name: Option<String>,
 }
 
 impl From<BTreeMap<String, String>> for ServiceAnnotations {
@@ -130,16 +200,16 @@ impl From<BTreeMap<String, String>> for ServiceAnnotations {
             .unwrap_or(1);
         let topology_key = annotations.get("tlb.io/topology-key").cloned();
         let node_selector = annotations.get("tlb.io/node-selector").cloned();
+        let map_ports = annotations.get("tlb.io/map-ports").cloned();
         let tls_secret_name = annotations.get("tlb.io/tls-secret-name").cloned();
-        let tls_port = annotations.get("tlb.io/tls-port").and_then(|s| s.parse().ok());
 
         ServiceAnnotations {
             dns,
             replicas,
             topology_key,
             node_selector,
+            map_ports,
             tls_secret_name,
-            tls_port,
         }
     }
 }
