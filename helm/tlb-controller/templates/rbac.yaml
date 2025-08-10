@@ -43,6 +43,20 @@ rules:
       - services/status
     verbs:
       - patch
+  - apiGroups: [""]
+    resources:
+      - configmaps
+      - secrets
+    verbs:
+      - create
+      - get
+      - patch
+      - delete
+  - apiGroups: [""]
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - delete
   - apiGroups: ["events.k8s.io"]
     resources:
       - events
