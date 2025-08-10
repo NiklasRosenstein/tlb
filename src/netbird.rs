@@ -49,7 +49,7 @@ const DEFAULT_ANNOUNCE_TYPE: NetbirdAnnounceType = NetbirdAnnounceType::IP;
 pub const NETBIRD_PEER_IP_PORT: u16 = 15411;
 
 ///
-/// Generates a shell script that sets up iptables rules for forwarding traffic coming in to the Netbird interface
+/// Generates a shell script that sets up port forwarding using socat for traffic coming in to the Netbird interface
 /// and launches the Netbird service.
 ///
 #[allow(clippy::too_many_arguments)]
@@ -58,7 +58,7 @@ fn get_netbird_launch_script(
     service_ip: String,
     service_name: String,
     service_namespace: String,
-    cluster_iface: String,
+    _cluster_iface: String,
     netbird_iface: String,
     up_command: String,
     ports: &[ServicePort],
@@ -66,68 +66,34 @@ fn get_netbird_launch_script(
 ) -> String {
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
-    match forwarding_mode {
-        NetbirdForwardingMode::Iptables => {
-            // Install iptables if it's not already installed.
-            launch_script.push("if ! command iptables >/dev/null; then apk add --no-cache iptables; fi".to_owned());
-        }
-        NetbirdForwardingMode::Socat | NetbirdForwardingMode::SocatWithDns => {
-            // Install socat if it's not already installed.
-            launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
-        }
-    }
+    // Install socat if it's not already installed.
+    launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
 
     if let Some(mappings) = port_mappings {
         // Use custom port mappings
         for mapping in mappings {
-            let protocol = "tcp"; // Port mappings currently only support TCP
-            let protocol_upper = "TCP";
-
-            // Resolve service port to actual port number
-            let target_port = if let Ok(port_num) = mapping.service_port.parse::<i32>() {
-                port_num
+            // Resolve service port to actual port number and protocol
+            let (target_port, protocol) = if let Ok(port_num) = mapping.service_port.parse::<i32>() {
+                // Port specified by number - find matching port for protocol
+                let service_port = ports.iter().find(|p| p.port == port_num);
+                let protocol = service_port
+                    .and_then(|p| p.protocol.as_ref())
+                    .unwrap_or(&"TCP".to_string())
+                    .to_lowercase();
+                (port_num, protocol)
             } else {
                 // Look up port by name
                 if let Some(service_port) = ports.iter().find(|p| p.name.as_ref() == Some(&mapping.service_port)) {
-                    service_port.port
+                    let protocol = service_port.protocol.as_ref().unwrap_or(&"TCP".to_string()).to_lowercase();
+                    (service_port.port, protocol)
                 } else {
                     // Skip this mapping if port name not found
                     continue;
                 }
             };
+            let protocol_upper = protocol.to_uppercase();
 
             match forwarding_mode {
-                NetbirdForwardingMode::Iptables => {
-                    // Iptables mode doesn't support TLS, so ignore TLS flags
-                    // Accept new connections to the cluster IP and port.
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                            -p {protocol} -d {service_ip} --dport {target_port} -m conntrack \
-                            --ctstate NEW -j ACCEPT"
-                    ));
-
-                    // Accept established connections to the cluster IP and port.
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                    ));
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
-                            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                    ));
-
-                    // NAT packets destined for the listen port to target port.
-                    launch_script.push(format!(
-                        "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                            -p {protocol} --dport {} -j DNAT \
-                            --to-destination {service_ip}:{target_port}",
-                        mapping.listen_port
-                    ));
-
-                    launch_script.push(format!(
-                        "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-                    ));
-                }
                 NetbirdForwardingMode::Socat => {
                     let listen_spec = if mapping.listen_tls {
                         format!(
@@ -184,35 +150,6 @@ fn get_netbird_launch_script(
             let port_num = port.port;
 
             match forwarding_mode {
-                NetbirdForwardingMode::Iptables => {
-                    // Accept new connections to the cluster IP and port.
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                            -p {protocol} -d {service_ip} --dport {port_num} -m conntrack \
-                            --ctstate NEW -j ACCEPT"
-                    ));
-
-                    // Accept established connections to the cluster IP and port.
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {netbird_iface} -o {cluster_iface} \
-                        -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                    ));
-                    launch_script.push(format!(
-                        "iptables -A FORWARD -i {cluster_iface} -o {netbird_iface} \
-                            -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
-                    ));
-
-                    // NAT packets destined for the cluster IP and port.
-                    launch_script.push(format!(
-                        "iptables -t nat -I PREROUTING 1 -i {netbird_iface} \
-                            -p {protocol} --dport {port_num} -j DNAT \
-                            --to-destination {service_ip}:{port_num}"
-                    ));
-
-                    launch_script.push(format!(
-                        "iptables -t nat -A POSTROUTING -o {cluster_iface} -j MASQUERADE"
-                    ));
-                }
                 NetbirdForwardingMode::Socat => {
                     // Regular socat forwarding without TLS
                     launch_script.push(format!(
@@ -338,30 +275,7 @@ impl TunnelProvider for NetbirdConfig {
         let forwarding_mode = self.forwarding_mode.clone().unwrap_or(NetbirdForwardingMode::Socat);
         let port_mappings = if let Some(map_ports_str) = &options.map_ports {
             match crate::PortMapping::parse_multiple(map_ports_str) {
-                Ok(mappings) => {
-                    // Validate that TLS is only used with Socat modes
-                    if forwarding_mode == NetbirdForwardingMode::Iptables {
-                        let has_tls = mappings.iter().any(|m| m.listen_tls || m.service_tls);
-                        if has_tls {
-                            ctx.events
-                                .publish(
-                                    &service.object_ref(&()),
-                                    EventType::Warning,
-                                    "TLSConfigurationError".into(),
-                                    Some(format!(
-                                        "TLS termination is not supported with iptables forwarding mode. \
-                                        Port mapping '{}' contains TLS configuration but the NetBird forwarding mode is set to 'Iptables'. \
-                                        TLS termination requires 'Socat' or 'SocatWithDns' forwarding mode.",
-                                        map_ports_str
-                                    )),
-                                    "Reconcile".into(),
-                                )
-                                .await?;
-                            return Ok(());
-                        }
-                    }
-                    Some(mappings)
-                }
+                Ok(mappings) => Some(mappings),
                 Err(err) => {
                     ctx.events
                         .publish(
@@ -1108,32 +1022,5 @@ mod tests {
         assert!(script.contains("TCP-LISTEN:80"));
         assert!(!script.contains("openssl-listen"));
         assert!(!script.contains("cert="));
-    }
-
-    #[test]
-    fn test_iptables_mode_without_port_mappings() {
-        let ports = vec![ServicePort {
-            name: Some("http".to_string()),
-            port: 80,
-            protocol: Some("TCP".to_string()),
-            ..Default::default()
-        }];
-
-        let script = get_netbird_launch_script(
-            NetbirdForwardingMode::Iptables,
-            "10.0.0.1".to_string(),
-            "test-service".to_string(),
-            "default".to_string(),
-            "eth0".to_string(),
-            "wt0".to_string(),
-            "netbird up".to_string(),
-            &ports,
-            None, // No port mappings
-        );
-
-        // Should use iptables, not socat
-        assert!(script.contains("iptables"));
-        assert!(!script.contains("socat"));
-        assert!(!script.contains("openssl-listen"));
     }
 }

@@ -110,7 +110,7 @@ Configure your tunnels using these Service annotations:
 
 - **Purpose**: Configures advanced port mapping and TLS termination
 - **Format**: `"(listen-port)[/tls]:(service-port)[/tls[-no-verify]]"`
-- **Requirements**: TLS features only supported with `Socat` or `SocatWithDns` forwarding modes (not `Iptables`)
+- **Requirements**: TLS features are supported with both `Socat` and `SocatWithDns` forwarding modes
 - **Multiple mappings**: Comma-separated entries, whitespace ignored
 - **Examples**:
   - `"80:http"` - Listen on port 80, forward to service port named "http"
@@ -137,8 +137,7 @@ allows you to:
 - Support HTTPS services with certificate management in Kubernetes
 - Configure complex port mappings with mixed TLS/non-TLS backends
 
-**Important:** TLS termination is only supported when using `Socat` or `SocatWithDns` forwarding modes. It is not
-supported with the `Iptables` forwarding mode.
+**Important:** TLS termination is supported with both `Socat` and `SocatWithDns` forwarding modes.
 
 ### TLS Termination Example
 

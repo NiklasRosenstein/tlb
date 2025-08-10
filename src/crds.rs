@@ -125,19 +125,10 @@ pub enum NetbirdAnnounceType {
 /// Specifies how forwarding is implemented in the Netbird pod(s) that are created for the service.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub enum NetbirdForwardingMode {
-    /// [Experimental] Setup forwarding with `iptables` rules.
-    ///
-    /// This mode is known to have issues with ports other than 80/443 (don't ask me why).
-    ///
-    /// **Important:** TLS termination is not supported with this mode. Use `Socat` or `SocatWithDns`
-    /// for TLS termination functionality.
-    Iptables,
-
     /// [Experimental] Install and run  `socat` to forward traffic. When this mode is used as the `socat` program
     /// is not available in the Netbird image, it will be installed using the image's package manager. Currently,
     /// only `apk` is supported.
     ///
-    /// This mode is more stable and generally usable than [`NetbirdForwardingMode::Iptables`] at this time.
     /// **This mode supports TLS termination** using the `tlb.io/map-ports` annotation along with
     /// `tlb.io/tls-secret-name` for certificate configuration.
     Socat,
