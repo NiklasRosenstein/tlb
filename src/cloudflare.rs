@@ -7,7 +7,7 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
+            ConfigMap, Container, LoadBalancerIngress, Pod, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
             ServiceStatus, Volume, VolumeMount,
         },
     },
@@ -15,7 +15,7 @@ use k8s_openapi::{
 };
 use kube::{
     Resource,
-    api::{Api, Patch, PatchParams, PostParams, ResourceExt},
+    api::{Api, LogParams, Patch, PatchParams, PostParams, ResourceExt},
 };
 use log::{error, info};
 use rand::RngCore;
@@ -35,6 +35,7 @@ const DEFAULT_CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared:latest";
 const CLOUDFLARE_API_URL: &str = "https://api.cloudflare.com/client/v4";
 const DEFAULT_RESOURCE_PREFIX: &str = "cf-";
 const DEFAULT_TUNNEL_PREFIX: &str = "kube-";
+const TUNNEL_URL_ANNOTATION: &str = "controller.tlb.io/cloudflare-quick-tunnel-url";
 
 #[derive(Deserialize, Debug)]
 struct CloudflareApiMsg {
@@ -99,6 +100,82 @@ struct CreateTunnelPayload<'a> {
     name: &'a str,
     config_src: &'a str,
     tunnel_secret: &'a str,
+}
+
+/// Extracts the Cloudflare tunnel URL from pod logs
+/// Looks for the pattern: "https://....trycloudflare.com" in the logs
+async fn extract_tunnel_url_from_logs(
+    client: kube::Client,
+    namespace: &str,
+    deployment_name: &str,
+) -> Result<Option<String>> {
+    let pod_api: Api<Pod> = Api::namespaced(client, namespace);
+    
+    // Find pods for this deployment
+    let label_selector = format!("app={deployment_name}");
+    let pods = pod_api
+        .list(&kube::api::ListParams::default().labels(&label_selector))
+        .await?;
+
+    for pod in pods.items {
+        if let Some(pod_name) = &pod.metadata.name {
+            // Check if pod is running
+            if let Some(status) = &pod.status {
+                if let Some(phase) = &status.phase {
+                    if phase != "Running" {
+                        continue;
+                    }
+                }
+            }
+
+            // Get logs from the cloudflared container
+            let log_params = LogParams {
+                container: Some("cloudflared".to_string()),
+                tail_lines: Some(100), // Look at recent logs
+                ..Default::default()
+            };
+
+            match pod_api.logs(pod_name, &log_params).await {
+                Ok(logs) => {
+                    // Look for the tunnel URL pattern in logs
+                    for line in logs.lines() {
+                        if let Some(url) = extract_url_from_log_line(line) {
+                            info!("Found tunnel URL in logs: {url}");
+                            return Ok(Some(url));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Continue to next pod if logs aren't available yet
+                    info!("Could not get logs from pod {pod_name}: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Extracts URL from a single log line if it matches the tunnel announcement pattern
+fn extract_url_from_log_line(line: &str) -> Option<String> {
+    // Look for the pattern: "https://....trycloudflare.com"
+    // The logs contain lines like:
+    // "2025-08-11T15:39:42Z INF |  https://coins-mj-geographical-inquire.trycloudflare.com  |"
+    if line.contains("trycloudflare.com") {
+        // Extract URL using regex-like pattern matching
+        if let Some(start) = line.find("https://") {
+            if let Some(end) = line[start..].find(" ") {
+                return Some(line[start..start + end].trim().to_string());
+            } else {
+                // URL might be at the end of the line
+                let url = line[start..].trim().trim_end_matches('|').trim();
+                if url.ends_with("trycloudflare.com") {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 impl CloudflareApi {
@@ -626,14 +703,12 @@ impl CloudflareConfig {
         // Validate api_token_ref and account_id configuration for API mode
         let api_token_ref = self.api_token_ref.as_ref().ok_or_else(|| {
             Error::ConfigError(format!(
-                "API mode requires api_token_ref to be set for service '{}'",
-                svc_name
+                "API mode requires api_token_ref to be set for service '{svc_name}'"
             ))
         })?;
         let account_id = self.account_id.as_ref().ok_or_else(|| {
             Error::ConfigError(format!(
-                "API mode requires account_id to be set for service '{}'",
-                svc_name
+                "API mode requires account_id to be set for service '{svc_name}'"
             ))
         })?;
 
@@ -1077,8 +1152,7 @@ impl CloudflareConfig {
             format!("{}://{}.{}:{}", protocol, svc_name, svc_namespace, port.port)
         } else {
             return Err(Error::ConfigError(format!(
-                "Service '{}' has no ports defined - cannot create quick tunnel",
-                svc_name
+                "Service '{svc_name}' has no ports defined - cannot create quick tunnel"
             )));
         };
 
@@ -1154,10 +1228,50 @@ impl CloudflareConfig {
 
         info!("Reconciled cloudflared deployment {deployment_name} for service {svc_name} in quick mode");
 
-        // For quick mode, we can't predict the tunnel URL since it's generated by cloudflared
-        // We'll set a placeholder that indicates the tunnel is starting up
-        // In a real implementation, you'd want to read the logs to extract the actual URL
-        let ingress_hostnames = vec!["<quick-tunnel-starting>".to_string()];
+        // Check if we already have the tunnel URL cached in service annotations
+        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
+        let mut tunnel_url = service
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(TUNNEL_URL_ANNOTATION))
+            .cloned();
+
+        // If not cached, try to extract it from pod logs
+        if tunnel_url.is_none() {
+            if let Ok(Some(url)) = extract_tunnel_url_from_logs(
+                ctx.client.clone(),
+                &svc_namespace,
+                &deployment_name,
+            ).await {
+                tunnel_url = Some(url.clone());
+                
+                // Cache the tunnel URL in service annotations
+                let patch = json!({
+                    "metadata": {
+                        "annotations": {
+                            TUNNEL_URL_ANNOTATION: url
+                        }
+                    }
+                });
+                
+                if let Err(e) = svc_api
+                    .patch(&svc_name, &PatchParams::apply("tlb-controller"), &Patch::Merge(&patch))
+                    .await 
+                {
+                    error!("Failed to cache tunnel URL in service annotations: {e}");
+                }
+            }
+        }
+
+        // Use the tunnel URL if found, otherwise use a placeholder
+        let ingress_hostnames = if let Some(url) = tunnel_url {
+            // Extract hostname from URL (remove https:// prefix)
+            let hostname = url.strip_prefix("https://").unwrap_or(&url).to_string();
+            vec![hostname]
+        } else {
+            vec!["<quick-tunnel-starting>".to_string()]
+        };
 
         let ingress: Vec<LoadBalancerIngress> = ingress_hostnames
             .into_iter()
@@ -1178,7 +1292,6 @@ impl CloudflareConfig {
             "status": status
         }));
 
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
         let ps = PatchParams::apply("tlb-controller").force();
         svc_api.patch_status(&svc_name, &ps, &new_status).await?;
 
@@ -1198,8 +1311,7 @@ impl CloudflareConfig {
 
         if api_token_ref.is_none() || account_id.is_none() {
             error!(
-                "Invalid Cloudflare configuration for service '{}': API mode requires api_token_ref and account_id",
-                svc_name
+                "Invalid Cloudflare configuration for service '{svc_name}': API mode requires api_token_ref and account_id"
             );
             return Err(Error::ConfigError(
                 "Invalid Cloudflare configuration: API mode requires api_token_ref and account_id".to_string(),
@@ -1223,7 +1335,7 @@ impl CloudflareConfig {
         let api_token = match crate::get_secret_value(&ctx.client, api_token_ref, &svc_namespace).await {
             Ok(token) => Some(token),
             Err(e) => {
-                error!("Failed to get API token secret '{:?}': {}", api_token_ref, e);
+                error!("Failed to get API token secret '{api_token_ref:?}': {e}");
                 // Continue with Kubernetes resource cleanup even if API access fails
                 None
             }
