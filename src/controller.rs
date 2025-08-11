@@ -194,24 +194,19 @@ async fn handle_service_finalizer(ctx: &ReconcileContext, service: &Service) -> 
                     }
                 } else {
                     error!(
-                        "Could not find tunnel class '{}' for service '{}' during cleanup",
-                        tunnel_class_name, service_name
+                        "Could not find tunnel class '{tunnel_class_name}' for service '{service_name}' during cleanup"
                     );
-                    cleanup_errors.push(format!("tunnel class '{}' not found", tunnel_class_name));
+                    cleanup_errors.push(format!("tunnel class '{tunnel_class_name}' not found"));
                 }
             } else {
-                error!(
-                    "Invalid tunnel class state '{}' for service '{}' during cleanup",
-                    state, service_name
-                );
-                cleanup_errors.push(format!("invalid tunnel class state '{}'", state));
+                error!("Invalid tunnel class state '{state}' for service '{service_name}' during cleanup");
+                cleanup_errors.push(format!("invalid tunnel class state '{state}'"));
             }
         } else {
             // No tunnel class information available - this shouldn't happen if our finalizer logic is correct
             // but we'll handle it gracefully by trying to remove the finalizer anyway
             error!(
-                "No tunnel class state found for service '{}' during cleanup - removing finalizer anyway",
-                service_name
+                "No tunnel class state found for service '{service_name}' during cleanup - removing finalizer anyway"
             );
         }
 
@@ -426,8 +421,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                     kube::runtime::events::EventType::Warning,
                     "ProviderTransitionNotSupported".into(),
                     Some(format!(
-                        "Provider transition from {} to {} is not supported. Resources from the previous provider may not be cleaned up automatically. Consider deleting and recreating the tunnel class instead.",
-                        last, current
+                        "Provider transition from {last} to {current} is not supported. Resources from the previous provider may not be cleaned up automatically. Consider deleting and recreating the tunnel class instead."
                     )),
                     "Reconcile".into(),
                 )
@@ -713,7 +707,7 @@ pub async fn run(reconcile_interval: std::time::Duration) {
                         .1
                         .namespace
                         .as_ref()
-                        .map(|ns| format!(" in namespace '{}'", ns))
+                        .map(|ns| format!(" in namespace '{ns}'"))
                         .unwrap_or_default()
                 } else {
                     " (cluster-scoped)".to_string()

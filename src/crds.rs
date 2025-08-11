@@ -106,6 +106,9 @@ pub struct NetbirdConfig {
     /// The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage
     /// classes have a minimum size, so you might need to adjust this value.
     pub size: Option<String>,
+    /// Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
+    /// When enabled, prevents fallback to user space proxy. Defaults to `true`.
+    pub enable_ebpf_capabilities: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]

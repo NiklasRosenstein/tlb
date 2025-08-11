@@ -168,7 +168,7 @@ impl CloudflareApi {
     async fn list_zones(&self) -> anyhow::Result<Vec<Zone>> {
         let res = self
             .client
-            .get(format!("{}/zones", CLOUDFLARE_API_URL))
+            .get(format!("{CLOUDFLARE_API_URL}/zones"))
             .send()
             .await?
             .text()
@@ -219,7 +219,7 @@ impl CloudflareApi {
 
         let res = self
             .client
-            .post(format!("{}/zones/{}/dns_records", CLOUDFLARE_API_URL, zone_id))
+            .post(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records"))
             .json(&payload)
             .send()
             .await?
@@ -240,10 +240,7 @@ impl CloudflareApi {
     async fn list_dns_records(&self, zone_id: &str, name: &str) -> anyhow::Result<Vec<DnsRecord>> {
         let res = self
             .client
-            .get(format!(
-                "{}/zones/{}/dns_records?name={}",
-                CLOUDFLARE_API_URL, zone_id, name
-            ))
+            .get(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records?name={name}"))
             .send()
             .await?
             .text()
@@ -263,10 +260,7 @@ impl CloudflareApi {
     async fn delete_dns_record(&self, zone_id: &str, record_id: &str) -> anyhow::Result<()> {
         let res = self
             .client
-            .delete(format!(
-                "{}/zones/{}/dns_records/{}",
-                CLOUDFLARE_API_URL, zone_id, record_id
-            ))
+            .delete(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records/{record_id}"))
             .send()
             .await?;
 
@@ -367,17 +361,15 @@ fn generate_cloudflared_config(
     ports: &[ServicePort],
     protocol_annotation: Option<&str>,
 ) -> String {
-    let mut config = format!(
-        "tunnel: {}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n",
-        tunnel_id
-    );
+    let mut config =
+        format!("tunnel: {tunnel_id}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n");
 
     // Add ingress rules for each port
     for port in ports {
         let protocol = determine_port_protocol(port, protocol_annotation);
         let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, port.port);
 
-        config.push_str(&format!("  - service: {}\n", service_url));
+        config.push_str(&format!("  - service: {service_url}\n"));
     }
 
     config
@@ -391,7 +383,7 @@ async fn manage_dns_records(
     tunnel_hostname: &str,
     operation: DnsOperation,
 ) -> DnsManagementResult {
-    info!("manage_dns_records called with operation: {:?}", operation);
+    info!("manage_dns_records called with operation: {operation:?}");
     let mut result = DnsManagementResult::new();
     let hostnames: Vec<&str> = dns_annotation.split(',').map(|s| s.trim()).collect();
 
@@ -422,28 +414,27 @@ async fn manage_dns_records(
                                     {
                                         Ok(_) => {
                                             info!(
-                                                "Created CNAME record for '{}' pointing to '{}'",
-                                                hostname, tunnel_hostname
+                                                "Created CNAME record for '{hostname}' pointing to '{tunnel_hostname}'"
                                             );
                                             result.successful_hostnames.push(hostname.to_string());
                                         }
                                         Err(e) => {
-                                            error!("Failed to create DNS record for '{}': {}", hostname, e);
+                                            error!("Failed to create DNS record for '{hostname}': {e}");
                                             result
                                                 .failed_hostnames
-                                                .push((hostname.to_string(), format!("create DNS record: {}", e)));
+                                                .push((hostname.to_string(), format!("create DNS record: {e}")));
                                         }
                                     }
                                 } else {
-                                    info!("CNAME record for '{}' already exists", hostname);
+                                    info!("CNAME record for '{hostname}' already exists");
                                     result.successful_hostnames.push(hostname.to_string());
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to list DNS records for '{}': {}", hostname, e);
+                                error!("Failed to list DNS records for '{hostname}': {e}");
                                 result
                                     .failed_hostnames
-                                    .push((hostname.to_string(), format!("list DNS records for creation: {}", e)));
+                                    .push((hostname.to_string(), format!("list DNS records for creation: {e}")));
                             }
                         }
                     }
@@ -457,26 +448,25 @@ async fn manage_dns_records(
                                         match cf_client.delete_dns_record(&zone.id, &record.id).await {
                                             Ok(_) => {
                                                 info!(
-                                                    "Deleted DNS record for '{}' pointing to tunnel '{}'",
-                                                    hostname, tunnel_hostname
+                                                    "Deleted DNS record for '{hostname}' pointing to tunnel '{tunnel_hostname}'"
                                                 );
                                                 result.successful_hostnames.push(hostname.to_string());
                                             }
                                             Err(e) => {
-                                                error!("Failed to delete DNS record for '{}': {}", hostname, e);
+                                                error!("Failed to delete DNS record for '{hostname}': {e}");
                                                 result
                                                     .failed_hostnames
-                                                    .push((hostname.to_string(), format!("delete DNS record: {}", e)));
+                                                    .push((hostname.to_string(), format!("delete DNS record: {e}")));
                                             }
                                         }
                                     }
                                 }
                             }
                             Err(e) => {
-                                error!("Failed to list DNS records for '{}': {}", hostname, e);
+                                error!("Failed to list DNS records for '{hostname}': {e}");
                                 result
                                     .failed_hostnames
-                                    .push((hostname.to_string(), format!("list DNS records for deletion: {}", e)));
+                                    .push((hostname.to_string(), format!("list DNS records for deletion: {e}")));
                             }
                         }
                     }
@@ -487,23 +477,20 @@ async fn manage_dns_records(
                     DnsOperation::Create => "creation",
                     DnsOperation::Delete => "cleanup",
                 };
-                error!("No Cloudflare zone found for hostname '{}' during {}", hostname, action);
+                error!("No Cloudflare zone found for hostname '{hostname}' during {action}");
                 result
                     .failed_hostnames
-                    .push((hostname.to_string(), format!("no zone found during {}", action)));
+                    .push((hostname.to_string(), format!("no zone found during {action}")));
             }
             Err(e) => {
                 let action = match operation {
                     DnsOperation::Create => "creation",
                     DnsOperation::Delete => "cleanup",
                 };
-                error!(
-                    "Failed to find zone for hostname '{}' during {}: {}",
-                    hostname, action, e
-                );
+                error!("Failed to find zone for hostname '{hostname}' during {action}: {e}");
                 result
                     .failed_hostnames
-                    .push((hostname.to_string(), format!("find zone during {}: {}", action, e)));
+                    .push((hostname.to_string(), format!("find zone during {action}: {e}")));
             }
         }
     }
@@ -755,8 +742,7 @@ impl TunnelProvider for CloudflareConfig {
         // Fetch current configmap to get its resource version.
         let configmap = configmap_api.get(&config_name).await.map_err(|e| {
             Error::CloudflareError(format!(
-                "Failed to get ConfigMap '{}' for service '{}': {}",
-                config_name, svc_name, e
+                "Failed to get ConfigMap '{config_name}' for service '{svc_name}': {e}"
             ))
         })?;
         let config_version = configmap
@@ -808,7 +794,7 @@ impl TunnelProvider for CloudflareConfig {
                             ("app".to_string(), deployment_name.clone()),
                             (
                                 "controller.tlb.io/config-version".to_string(),
-                                format!("{}-{}", secret_version, config_version),
+                                format!("{secret_version}-{config_version}"),
                             ),
                         ])),
                         ..Default::default()
@@ -902,10 +888,7 @@ impl TunnelProvider for CloudflareConfig {
         match announce_type {
             CloudflareAnnounceType::Internal => {
                 // Internal mode: only use the tunnel hostname, no DNS record management
-                info!(
-                    "Using Internal announce mode for service '{}' - only tunnel hostname will be announced",
-                    svc_name
-                );
+                info!("Using Internal announce mode for service '{svc_name}' - only tunnel hostname will be announced");
                 ingress_hostnames.push(tunnel_hostname.clone());
             }
             CloudflareAnnounceType::External => {
@@ -930,7 +913,7 @@ impl TunnelProvider for CloudflareConfig {
                                         &service.object_ref(&()),
                                         kube::runtime::events::EventType::Warning,
                                         "DNSRecordFailed".into(),
-                                        Some(format!("Failed to create DNS record for '{}': {}", hostname, error)),
+                                        Some(format!("Failed to create DNS record for '{hostname}': {error}")),
                                         "DNSManagement".into(),
                                     )
                                     .await?;
@@ -941,8 +924,7 @@ impl TunnelProvider for CloudflareConfig {
                     } else {
                         // All DNS records failed - fall back to tunnel hostname
                         error!(
-                            "Failed to create any DNS records for service '{}' - falling back to internal tunnel hostname",
-                            svc_name
+                            "Failed to create any DNS records for service '{svc_name}' - falling back to internal tunnel hostname"
                         );
                         ingress_hostnames.push(tunnel_hostname.clone());
 
@@ -953,17 +935,14 @@ impl TunnelProvider for CloudflareConfig {
                                     &service.object_ref(&()),
                                     kube::runtime::events::EventType::Warning,
                                     "DNSRecordFailed".into(),
-                                    Some(format!("Failed to create DNS record for '{}': {}", hostname, error)),
+                                    Some(format!("Failed to create DNS record for '{hostname}': {error}")),
                                     "DNSManagement".into(),
                                 )
                                 .await?;
                         }
                     }
                 } else {
-                    info!(
-                        "No DNS annotation found for service '{}' in External mode - using tunnel hostname",
-                        svc_name
-                    );
+                    info!("No DNS annotation found for service '{svc_name}' in External mode - using tunnel hostname");
                     // No DNS annotation in external mode - use tunnel hostname
                     ingress_hostnames.push(tunnel_hostname.clone());
                 }
@@ -1051,8 +1030,7 @@ impl TunnelProvider for CloudflareConfig {
             .await
             .map_err(|e| {
                 Error::CloudflareError(format!(
-                    "Failed to list Secrets for service '{}' in namespace '{}': {}",
-                    svc_name, svc_namespace, e
+                    "Failed to list Secrets for service '{svc_name}' in namespace '{svc_namespace}': {e}"
                 ))
             })?;
 
@@ -1108,17 +1086,16 @@ impl TunnelProvider for CloudflareConfig {
                                                 let failed_hostnames: Vec<String> = dns_result
                                                     .failed_hostnames
                                                     .iter()
-                                                    .map(|(hostname, error)| format!("{}: {}", hostname, error))
+                                                    .map(|(hostname, error)| format!("{hostname}: {error}"))
                                                     .collect();
                                                 let error_msg = format!(
                                                     "DNS record deletion failed: {}",
                                                     failed_hostnames.join(", ")
                                                 );
                                                 error!(
-                                                    "Failed to delete some DNS records for tunnel {tunnel_id}: {}",
-                                                    error_msg
+                                                    "Failed to delete some DNS records for tunnel {tunnel_id}: {error_msg}"
                                                 );
-                                                cleanup_errors.push(format!("DNS record deletion: {}", error_msg));
+                                                cleanup_errors.push(format!("DNS record deletion: {error_msg}"));
                                                 cleanup_successful = false;
 
                                                 // Post events for individual DNS deletion failures
@@ -1130,17 +1107,13 @@ impl TunnelProvider for CloudflareConfig {
                                                             kube::runtime::events::EventType::Warning,
                                                             "DNSRecordDeletionFailed".into(),
                                                             Some(format!(
-                                                                "Failed to delete DNS record for '{}': {}",
-                                                                hostname, error
+                                                                "Failed to delete DNS record for '{hostname}': {error}"
                                                             )),
                                                             "DNSCleanup".into(),
                                                         )
                                                         .await
                                                     {
-                                                        log::warn!(
-                                                            "Failed to publish DNS deletion failure event: {}",
-                                                            e
-                                                        );
+                                                        log::warn!("Failed to publish DNS deletion failure event: {e}");
                                                     }
                                                 }
                                             } else {
@@ -1189,8 +1162,7 @@ impl TunnelProvider for CloudflareConfig {
                         .await
                         .map_err(|e| {
                             Error::CloudflareError(format!(
-                                "Failed to remove finalizer from Secret '{}' for service '{}': {}",
-                                secret_name, svc_name, e
+                                "Failed to remove finalizer from Secret '{secret_name}' for service '{svc_name}': {e}"
                             ))
                         })?;
 
@@ -1215,11 +1187,8 @@ impl TunnelProvider for CloudflareConfig {
                         cleanup_errors.join(", ")
                     );
                     // Track critical cleanup failure for service-level error handling
-                    critical_cleanup_errors.extend(
-                        cleanup_errors
-                            .iter()
-                            .map(|e| format!("secret '{}': {}", secret_name, e)),
-                    );
+                    critical_cleanup_errors
+                        .extend(cleanup_errors.iter().map(|e| format!("secret '{secret_name}': {e}")));
                     continue; // Skip deletion attempt, secret will remain
                 }
             }
@@ -1227,8 +1196,7 @@ impl TunnelProvider for CloudflareConfig {
             info!("Deleting cloudflare secret `{secret_name}` for service `{svc_name}` using label selector");
             secret_api.delete(secret_name, &Default::default()).await.map_err(|e| {
                 Error::CloudflareError(format!(
-                    "Failed to delete Secret '{}' for service '{}': {}",
-                    secret_name, svc_name, e
+                    "Failed to delete Secret '{secret_name}' for service '{svc_name}': {e}"
                 ))
             })?;
         }
@@ -1240,8 +1208,7 @@ impl TunnelProvider for CloudflareConfig {
             .await
             .map_err(|e| {
                 Error::CloudflareError(format!(
-                    "Failed to list ConfigMaps for service '{}' in namespace '{}': {}",
-                    svc_name, svc_namespace, e
+                    "Failed to list ConfigMaps for service '{svc_name}' in namespace '{svc_namespace}': {e}"
                 ))
             })?;
 
@@ -1253,8 +1220,7 @@ impl TunnelProvider for CloudflareConfig {
                 .await
                 .map_err(|e| {
                     Error::CloudflareError(format!(
-                        "Failed to delete ConfigMap '{}' for service '{}': {}",
-                        configmap_name, svc_name, e
+                        "Failed to delete ConfigMap '{configmap_name}' for service '{svc_name}': {e}"
                     ))
                 })?;
         }
@@ -1266,8 +1232,7 @@ impl TunnelProvider for CloudflareConfig {
             .await
             .map_err(|e| {
                 Error::CloudflareError(format!(
-                    "Failed to list Deployments for service '{}' in namespace '{}': {}",
-                    svc_name, svc_namespace, e
+                    "Failed to list Deployments for service '{svc_name}' in namespace '{svc_namespace}': {e}"
                 ))
             })?;
 
@@ -1279,8 +1244,7 @@ impl TunnelProvider for CloudflareConfig {
                 .await
                 .map_err(|e| {
                     Error::CloudflareError(format!(
-                        "Failed to delete Deployment '{}' for service '{}': {}",
-                        deployment_name, svc_name, e
+                        "Failed to delete Deployment '{deployment_name}' for service '{svc_name}': {e}"
                     ))
                 })?;
         }
