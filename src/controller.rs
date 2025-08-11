@@ -793,6 +793,106 @@ async fn cleanup_abandoned_services(client: &kube::Client, events: &SimpleEventR
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::api::core::v1::{Service, ServiceSpec};
+    use std::collections::BTreeMap;
+
+    fn create_test_service(load_balancer_class: Option<&str>, annotations: BTreeMap<String, String>) -> Service {
+        Service {
+            metadata: kube::api::ObjectMeta {
+                name: Some("test-service".to_string()),
+                namespace: Some("default".to_string()),
+                annotations: if annotations.is_empty() {
+                    None
+                } else {
+                    Some(annotations)
+                },
+                ..Default::default()
+            },
+            spec: Some(ServiceSpec {
+                load_balancer_class: load_balancer_class.map(|s| s.to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_get_current_tunnel_state_with_tunnel_class() {
+        let service = create_test_service(Some("tlb.io/cloudflare"), BTreeMap::new());
+        let result = get_current_tunnel_state(&service);
+        assert_eq!(result, Some("tlb.io/cloudflare".to_string()));
+    }
+
+    #[test]
+    fn test_get_current_tunnel_state_without_tunnel_class() {
+        let service = create_test_service(None, BTreeMap::new());
+        let result = get_current_tunnel_state(&service);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_current_tunnel_state_with_non_tunnel_class() {
+        let service = create_test_service(Some("aws-load-balancer-controller"), BTreeMap::new());
+        let result = get_current_tunnel_state(&service);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_last_observed_state_with_annotation() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert(LAST_OBSERVED_STATE_ANNOTATION.to_string(), "tlb.io/netbird".to_string());
+        let service = create_test_service(None, annotations);
+        let result = get_last_observed_state(&service);
+        assert_eq!(result, Some("tlb.io/netbird".to_string()));
+    }
+
+    #[test]
+    fn test_get_last_observed_state_without_annotation() {
+        let service = create_test_service(None, BTreeMap::new());
+        let result = get_last_observed_state(&service);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_abandoned_service_detection() {
+        // Service that had tunnel class but now doesn't (abandoned)
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            LAST_OBSERVED_STATE_ANNOTATION.to_string(),
+            "tlb.io/cloudflare".to_string(),
+        );
+        let service = create_test_service(None, annotations);
+
+        let current_state = get_current_tunnel_state(&service);
+        let last_observed_state = get_last_observed_state(&service);
+
+        // This represents an abandoned service: has annotation but no current tunnel class
+        assert_eq!(current_state, None);
+        assert_eq!(last_observed_state, Some("tlb.io/cloudflare".to_string()));
+    }
+
+    #[test]
+    fn test_active_service_detection() {
+        // Service that currently has tunnel class and annotation (active)
+        let mut annotations = BTreeMap::new();
+        annotations.insert(
+            LAST_OBSERVED_STATE_ANNOTATION.to_string(),
+            "tlb.io/cloudflare".to_string(),
+        );
+        let service = create_test_service(Some("tlb.io/cloudflare"), annotations);
+
+        let current_state = get_current_tunnel_state(&service);
+        let last_observed_state = get_last_observed_state(&service);
+
+        // This represents an active service: has both annotation and current tunnel class
+        assert_eq!(current_state, Some("tlb.io/cloudflare".to_string()));
+        assert_eq!(last_observed_state, Some("tlb.io/cloudflare".to_string()));
+    }
+}
+
 pub async fn run(reconcile_interval: std::time::Duration) {
     let client = kube::Client::try_default()
         .await
