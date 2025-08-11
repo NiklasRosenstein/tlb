@@ -657,6 +657,142 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     Ok(Action::await_change())
 }
 
+/// Cleanup services that have the last-observed-state annotation but no longer
+/// have a tunnel loadBalancerClass (e.g., switched from LoadBalancer to ClusterIP)
+async fn cleanup_abandoned_services(client: &kube::Client, events: &SimpleEventRecorder) -> Result<()> {
+    info!("Starting cleanup pass for abandoned services");
+
+    // Get all namespaces
+    let namespaces = Api::<Namespace>::all(client.clone())
+        .list(&ListParams::default())
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    for namespace in namespaces {
+        let ns_name = namespace.metadata.name.as_ref().unwrap();
+        let service_api = Api::<Service>::namespaced(client.clone(), ns_name);
+
+        // Get all services in this namespace
+        let all_services = service_api.list(&ListParams::default()).await?;
+
+        for service in all_services {
+            // Check if service has the last-observed-state annotation
+            let last_observed_state = get_last_observed_state(&service);
+            if last_observed_state.is_none() {
+                continue;
+            }
+
+            // Check if service still has a tunnel loadBalancerClass
+            let current_state = get_current_tunnel_state(&service);
+            if current_state.is_some() {
+                continue; // Service still has a tunnel class, will be handled by regular reconciliation
+            }
+
+            // Service has annotation but no tunnel class - needs cleanup
+            let service_name = service.metadata.name.as_ref().unwrap();
+            info!(
+                "Found abandoned service `{}` in namespace `{}` with last observed state: {:?}",
+                service_name, ns_name, last_observed_state
+            );
+
+            // Create a dummy context for cleanup operations
+            let dummy_metadata = kube::api::ObjectMeta {
+                name: Some("cleanup".to_string()),
+                namespace: Some(ns_name.clone()),
+                ..Default::default()
+            };
+            let ctx = ReconcileContext {
+                client: client.clone(),
+                events: events.clone(),
+                metadata: dummy_metadata,
+                namespaced: true,
+            };
+
+            // Perform cleanup using the old provider if we can find it
+            if let Some(old_state) = last_observed_state {
+                if let Some(old_tunnel_class_name) = old_state.strip_prefix("tlb.io/") {
+                    // Look up the old tunnel class to get its provider configuration
+                    if let Ok(Some(old_provider)) =
+                        lookup_tunnel_class_provider(&ctx, old_tunnel_class_name, ns_name).await
+                    {
+                        info!(
+                            "Cleaning up abandoned service `{}` with provider: {}",
+                            service_name,
+                            old_provider.provider_type()
+                        );
+                        if let Err(e) = old_provider.cleanup_service(&ctx, &service).await {
+                            log::error!(
+                                "Provider '{}' cleanup failed for abandoned service '{}': {}",
+                                old_provider.name(),
+                                service_name,
+                                e
+                            );
+                            continue; // Skip finalizer removal if cleanup failed
+                        }
+                    } else {
+                        info!(
+                            "Could not find tunnel class '{}' for abandoned service '{}' - will remove annotation and finalizer anyway",
+                            old_tunnel_class_name, service_name
+                        );
+                    }
+                }
+            }
+
+            // Remove the last-observed-state annotation
+            if let Err(e) = update_service_state_annotation(&ctx, &service, None).await {
+                log::error!(
+                    "Failed to remove last-observed-state annotation from abandoned service '{}': {}",
+                    service_name,
+                    e
+                );
+            }
+
+            // Remove the finalizer if present
+            let has_finalizer = service
+                .metadata
+                .finalizers
+                .as_ref()
+                .map(|f| f.contains(&SERVICE_FINALIZER_NAME.to_string()))
+                .unwrap_or(false);
+
+            if has_finalizer {
+                let current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
+                let updated_finalizers: Vec<String> = current_finalizers
+                    .into_iter()
+                    .filter(|f| f != SERVICE_FINALIZER_NAME)
+                    .collect();
+
+                if let Err(e) = service_api
+                    .patch(
+                        service_name,
+                        &PatchParams::default(),
+                        &Patch::Merge(json!({
+                            "metadata": {
+                                "finalizers": updated_finalizers
+                            }
+                        })),
+                    )
+                    .await
+                {
+                    log::error!(
+                        "Failed to remove finalizer from abandoned service '{}': {}",
+                        service_name,
+                        e
+                    );
+                } else {
+                    info!(
+                        "Removed finalizer from abandoned service `{}` in namespace `{}`",
+                        service_name, ns_name
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn run(reconcile_interval: std::time::Duration) {
     let client = kube::Client::try_default()
         .await
@@ -722,6 +858,17 @@ pub async fn run(reconcile_interval: std::time::Duration) {
                 );
                 Action::requeue(reconcile_interval)
             });
+        }
+
+        // Cleanup pass: Find services that have the last-observed-state annotation but no longer
+        // have a tunnel loadBalancerClass and clean them up
+        if let Err(e) = cleanup_abandoned_services(&client, &events).await {
+            log::error!(
+                "Failed to cleanup abandoned services: {} (in controller::run at {}:{})",
+                e,
+                file!(),
+                line!()
+            );
         }
 
         interval.tick().await;
