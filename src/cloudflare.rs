@@ -375,6 +375,62 @@ fn determine_port_protocol(port: &ServicePort, map_ports_annotation: Option<&str
     }
 }
 
+/// Finds the service port that matches a port mapping
+fn find_service_port<'a>(mapping: &crate::PortMapping, ports: &'a [ServicePort]) -> Option<&'a ServicePort> {
+    // Try to match by port number first
+    if let Ok(port_number) = mapping.service_port.parse::<u16>() {
+        for port in ports {
+            if port.port as u16 == port_number {
+                return Some(port);
+            }
+        }
+    }
+    
+    // Try to match by port name
+    for port in ports {
+        if let Some(port_name) = &port.name {
+            if *port_name == mapping.service_port {
+                return Some(port);
+            }
+        }
+    }
+    
+    None
+}
+
+/// Determines the protocol for Cloudflare from a PortMapping and ServicePort
+fn determine_protocol_from_mapping(_mapping: &crate::PortMapping, service_port: &ServicePort) -> String {
+    // For Cloudflare, we need to determine the protocol based on the service port characteristics
+    // The PortMapping contains TLS information but Cloudflare protocols are different
+    
+    // Check service port name for protocol hints first
+    if let Some(port_name) = &service_port.name {
+        let name_lower = port_name.to_lowercase();
+        if name_lower.contains("http") && !name_lower.contains("https") {
+            return "http".to_string();
+        }
+        if name_lower.contains("https") {
+            return "https".to_string();
+        }
+        if name_lower.contains("ssh") {
+            return "ssh".to_string();
+        }
+        if name_lower.contains("rdp") {
+            return "rdp".to_string();
+        }
+    }
+
+    // Check well-known ports for the service port
+    for &(well_known_port, protocol) in WELL_KNOWN_PORTS {
+        if service_port.port as u16 == well_known_port {
+            return protocol.to_string();
+        }
+    }
+    
+    // Default to tcp
+    "tcp".to_string()
+}
+
 /// Generates cloudflared configuration YAML content
 fn generate_cloudflared_config(
     tunnel_id: &str,
@@ -386,12 +442,37 @@ fn generate_cloudflared_config(
     let mut config =
         format!("tunnel: {tunnel_id}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n");
 
-    // Add ingress rules for each port
-    for port in ports {
-        let protocol = determine_port_protocol(port, map_ports_annotation);
-        let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, port.port);
-
-        config.push_str(&format!("  - service: {service_url}\n"));
+    // Parse port mappings if annotation exists
+    if let Some(annotation) = map_ports_annotation {
+        // Use PortMapping struct to parse the annotation
+        match crate::PortMapping::parse_multiple(annotation) {
+            Ok(port_mappings) => {
+                // Generate service entries based on port mappings
+                for mapping in port_mappings {
+                    // Find the corresponding service port
+                    if let Some(service_port) = find_service_port(&mapping, ports) {
+                        let protocol = determine_protocol_from_mapping(&mapping, service_port);
+                        let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, service_port.port);
+                        config.push_str(&format!("  - service: {service_url}\n"));
+                    }
+                }
+            }
+            Err(_) => {
+                // Fall back to generating entries for each service port if parsing fails
+                for port in ports {
+                    let protocol = determine_port_protocol(port, map_ports_annotation);
+                    let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, port.port);
+                    config.push_str(&format!("  - service: {service_url}\n"));
+                }
+            }
+        }
+    } else {
+        // No annotation - generate entries for each service port
+        for port in ports {
+            let protocol = determine_port_protocol(port, None);
+            let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, port.port);
+            config.push_str(&format!("  - service: {service_url}\n"));
+        }
     }
 
     config
