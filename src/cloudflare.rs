@@ -110,7 +110,7 @@ async fn extract_tunnel_url_from_logs(
     deployment_name: &str,
 ) -> Result<Option<String>> {
     let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-    
+
     // Find pods for this deployment
     let label_selector = format!("app={deployment_name}");
     let pods = pod_api
@@ -1239,13 +1239,11 @@ impl CloudflareConfig {
 
         // If not cached, try to extract it from pod logs
         if tunnel_url.is_none() {
-            if let Ok(Some(url)) = extract_tunnel_url_from_logs(
-                ctx.client.clone(),
-                &svc_namespace,
-                &deployment_name,
-            ).await {
+            if let Ok(Some(url)) =
+                extract_tunnel_url_from_logs(ctx.client.clone(), &svc_namespace, &deployment_name).await
+            {
                 tunnel_url = Some(url.clone());
-                
+
                 // Cache the tunnel URL in service annotations
                 let patch = json!({
                     "metadata": {
@@ -1254,23 +1252,23 @@ impl CloudflareConfig {
                         }
                     }
                 });
-                
+
                 if let Err(e) = svc_api
                     .patch(&svc_name, &PatchParams::apply("tlb-controller"), &Patch::Merge(&patch))
-                    .await 
+                    .await
                 {
                     error!("Failed to cache tunnel URL in service annotations: {e}");
                 }
             }
         }
 
-        // Use the tunnel URL if found, otherwise use a placeholder
+        // Use the tunnel URL if found, otherwise return empty list
         let ingress_hostnames = if let Some(url) = tunnel_url {
             // Extract hostname from URL (remove https:// prefix)
             let hostname = url.strip_prefix("https://").unwrap_or(&url).to_string();
             vec![hostname]
         } else {
-            vec!["<quick-tunnel-starting>".to_string()]
+            vec![]
         };
 
         let ingress: Vec<LoadBalancerIngress> = ingress_hostnames
