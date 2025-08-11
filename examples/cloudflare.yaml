@@ -10,9 +10,6 @@ spec:
       name: cloudflare-api-key
       namespace: default
       key: token
-    # Configure UDP buffer tuning to resolve "failed to sufficiently increase receive buffer size" errors
-    # Options: None (disable), PrivilegedInitContainer (recommended), KubernetesApi (requires cluster sysctl allowlist)
-    enableUdpBufferTuning: PrivilegedInitContainer
 
 ---
 apiVersion: v1
