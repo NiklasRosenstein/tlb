@@ -7,11 +7,8 @@ metadata:
   name: cloudflare-quick
 spec:
   cloudflare:
-    # Quick tunnel mode is automatically selected when no API credentials are provided
-    # Optional: Custom cloudflared image
-    # image: cloudflare/cloudflared:latest
-    # Optional: Custom resource prefix
-    # resourcePrefix: cf-quick-
+    # Quick mode: no API credentials needed (omit apiTokenRef and accountId)
+    image: cloudflare/cloudflared:latest
 
 ---
 # Example service using the quick tunnel mode
