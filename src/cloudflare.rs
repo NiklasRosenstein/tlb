@@ -385,7 +385,7 @@ fn find_service_port<'a>(mapping: &crate::PortMapping, ports: &'a [ServicePort])
             }
         }
     }
-    
+
     // Try to match by port name
     for port in ports {
         if let Some(port_name) = &port.name {
@@ -394,16 +394,39 @@ fn find_service_port<'a>(mapping: &crate::PortMapping, ports: &'a [ServicePort])
             }
         }
     }
-    
+
     None
 }
 
 /// Determines the protocol for Cloudflare from a PortMapping and ServicePort
-fn determine_protocol_from_mapping(_mapping: &crate::PortMapping, service_port: &ServicePort) -> String {
-    // For Cloudflare, we need to determine the protocol based on the service port characteristics
-    // The PortMapping contains TLS information but Cloudflare protocols are different
-    
-    // Check service port name for protocol hints first
+fn determine_protocol_from_mapping(mapping: &crate::PortMapping, service_port: &ServicePort) -> String {
+    // For Cloudflare, we can use the listen port information to determine protocol
+
+    // First, check if listen port is a named port that indicates protocol
+    let listen_port_lower = mapping.listen_port.to_lowercase();
+    if listen_port_lower == "http" {
+        return "http".to_string();
+    }
+    if listen_port_lower == "https" {
+        return "https".to_string();
+    }
+    if listen_port_lower == "ssh" {
+        return "ssh".to_string();
+    }
+    if listen_port_lower == "rdp" {
+        return "rdp".to_string();
+    }
+
+    // If listen port is numeric, check for well-known port numbers
+    if let Ok(port_num) = mapping.listen_port.parse::<u16>() {
+        for &(well_known_port, protocol) in WELL_KNOWN_PORTS {
+            if port_num == well_known_port {
+                return protocol.to_string();
+            }
+        }
+    }
+
+    // Fall back to checking service port name for protocol hints
     if let Some(port_name) = &service_port.name {
         let name_lower = port_name.to_lowercase();
         if name_lower.contains("http") && !name_lower.contains("https") {
@@ -426,7 +449,7 @@ fn determine_protocol_from_mapping(_mapping: &crate::PortMapping, service_port: 
             return protocol.to_string();
         }
     }
-    
+
     // Default to tcp
     "tcp".to_string()
 }
@@ -452,7 +475,8 @@ fn generate_cloudflared_config(
                     // Find the corresponding service port
                     if let Some(service_port) = find_service_port(&mapping, ports) {
                         let protocol = determine_protocol_from_mapping(&mapping, service_port);
-                        let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, service_port.port);
+                        let service_url =
+                            format!("{}://{}.{}:{}", protocol, service_name, namespace, service_port.port);
                         config.push_str(&format!("  - service: {service_url}\n"));
                     }
                 }
@@ -1453,9 +1477,42 @@ mod cloudflare_tests {
         );
 
         assert!(config.contains("tunnel: test-tunnel-id"));
-        // Since we use NetBird format, protocols are determined from port characteristics
-        // Port 8080 with web name should get http protocol, and port 2222 should get tcp
-        assert!(config.contains("service: http://test-service.default:8080"));
-        assert!(config.contains("service: tcp://test-service.default:2222"));
+        // With listen port support, protocols are determined from listen ports first
+        // 443/tls:8080 -> 443 is well-known HTTPS port, so https protocol
+        // 22:2222 -> 22 is well-known SSH port, so ssh protocol
+        assert!(config.contains("service: https://test-service.default:8080"));
+        assert!(config.contains("service: ssh://test-service.default:2222"));
+    }
+
+    #[test]
+    fn test_generate_cloudflared_config_with_named_listen_ports() {
+        let ports = vec![
+            ServicePort {
+                name: Some("web".to_string()),
+                port: 8080,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+            ServicePort {
+                name: Some("api".to_string()),
+                port: 3000,
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        // Test that Cloudflare can handle named listen ports
+        let config = generate_cloudflared_config(
+            "test-tunnel-id",
+            "test-service",
+            "default",
+            &ports,
+            Some("https/tls:web, http:api"),
+        );
+
+        assert!(config.contains("tunnel: test-tunnel-id"));
+        // Should generate service entries for both mappings based on named listen ports
+        assert!(config.contains("service: https://test-service.default:8080")); // https/tls:web -> https protocol
+        assert!(config.contains("service: http://test-service.default:3000")); // http:api -> http protocol
     }
 }
