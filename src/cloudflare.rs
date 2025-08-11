@@ -7,8 +7,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
-            ServiceStatus, Volume, VolumeMount,
+            ConfigMap, Container, LoadBalancerIngress, PodSecurityContext, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
+            ServiceStatus, Sysctl, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference},
@@ -806,6 +806,23 @@ impl TunnelProvider for CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
+                        security_context: if self.enable_udp_buffer_tuning.unwrap_or(false) {
+                            Some(PodSecurityContext {
+                                sysctls: Some(vec![
+                                    Sysctl {
+                                        name: "net.core.rmem_max".to_string(),
+                                        value: "7500000".to_string(),
+                                    },
+                                    Sysctl {
+                                        name: "net.core.wmem_max".to_string(),
+                                        value: "7500000".to_string(),
+                                    },
+                                ]),
+                                ..Default::default()
+                            })
+                        } else {
+                            None
+                        },
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),

@@ -49,6 +49,10 @@ pub struct CloudflareConfig {
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
+    /// Enable UDP buffer tuning by setting net.core.rmem_max and net.core.wmem_max sysctls.
+    /// This resolves the "failed to sufficiently increase receive buffer size" error from cloudflared.
+    /// Requires the cluster to allow these sysctls. Defaults to `false` for security reasons.
+    pub enable_udp_buffer_tuning: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
