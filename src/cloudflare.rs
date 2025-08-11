@@ -7,8 +7,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Secret,
-            Service, ServicePort, ServiceStatus, Sysctl, Volume, VolumeMount,
+            ConfigMap, Container, LoadBalancerIngress, Pod, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
+            ServiceStatus, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference},
@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::{
     Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{CloudflareAnnounceType, CloudflareConfig, UdpBufferTuningMode},
+    crds::{CloudflareAnnounceType, CloudflareConfig},
 };
 
 use crate::{FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL};
@@ -450,49 +450,6 @@ fn generate_cloudflared_config(
     }
 
     config
-}
-
-/// Generates PodSecurityContext with UDP buffer tuning sysctls if using KubernetesApi mode
-fn build_udp_buffer_tuning_security_context(
-    enable_udp_buffer_tuning: Option<UdpBufferTuningMode>,
-) -> Option<PodSecurityContext> {
-    match enable_udp_buffer_tuning.unwrap_or(UdpBufferTuningMode::PrivilegedInitContainer) {
-        UdpBufferTuningMode::KubernetesApi => Some(PodSecurityContext {
-            sysctls: Some(vec![
-                Sysctl {
-                    name: "net.core.rmem_max".to_string(),
-                    value: "7500000".to_string(),
-                },
-                Sysctl {
-                    name: "net.core.wmem_max".to_string(),
-                    value: "7500000".to_string(),
-                },
-            ]),
-            ..Default::default()
-        }),
-        UdpBufferTuningMode::None | UdpBufferTuningMode::PrivilegedInitContainer => None,
-    }
-}
-
-/// Generates init container for UDP buffer tuning if using PrivilegedInitContainer mode
-fn build_udp_buffer_tuning_init_container(enable_udp_buffer_tuning: Option<UdpBufferTuningMode>) -> Vec<Container> {
-    match enable_udp_buffer_tuning.unwrap_or(UdpBufferTuningMode::PrivilegedInitContainer) {
-        UdpBufferTuningMode::PrivilegedInitContainer => vec![Container {
-            name: "udp-buffer-tuning".to_string(),
-            image: Some("alpine:latest".to_string()),
-            command: Some(vec![
-                "sh".to_string(),
-                "-c".to_string(),
-                "sysctl -w net.core.rmem_max=7500000 && sysctl -w net.core.wmem_max=7500000".to_string(),
-            ]),
-            security_context: Some(k8s_openapi::api::core::v1::SecurityContext {
-                privileged: Some(true),
-                ..Default::default()
-            }),
-            ..Default::default()
-        }],
-        UdpBufferTuningMode::None | UdpBufferTuningMode::KubernetesApi => vec![],
-    }
 }
 
 /// Manages DNS records for a service - either creates or deletes them based on the operation
@@ -987,8 +944,6 @@ impl CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
-                        security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
-                        init_containers: Some(build_udp_buffer_tuning_init_container(self.enable_udp_buffer_tuning)),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
@@ -1238,8 +1193,6 @@ impl CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
-                        security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
-                        init_containers: Some(build_udp_buffer_tuning_init_container(self.enable_udp_buffer_tuning)),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
@@ -1701,7 +1654,6 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            enable_udp_buffer_tuning: None,
         };
 
         let config_quick_mode = CloudflareConfig {
@@ -1711,7 +1663,6 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            enable_udp_buffer_tuning: None,
         };
 
         // Check that API mode is detected when both api_token_ref and account_id are present
@@ -1734,7 +1685,6 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            enable_udp_buffer_tuning: None,
         };
 
         let config_partial_2 = CloudflareConfig {
@@ -1744,7 +1694,6 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            enable_udp_buffer_tuning: None,
         };
 
         // Both partial configurations should use Quick mode (not use_api_mode)

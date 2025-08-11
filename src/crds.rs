@@ -51,9 +51,6 @@ pub struct CloudflareConfig {
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
-    /// Configure UDP buffer tuning to resolve the "failed to sufficiently increase receive buffer size" error from cloudflared.
-    /// Defaults to `PrivilegedInitContainer` for best compatibility.
-    pub enable_udp_buffer_tuning: Option<UdpBufferTuningMode>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -71,21 +68,6 @@ pub enum CloudflareAnnounceType {
     /// If the DNS zone is not managed by the same Cloudflare account, this will not work. If the DNS zone cannot be
     /// edited, the provider will fall back to [`CloudflareAnnounceType::Internal`].
     External,
-}
-
-/// Configures how UDP buffer tuning is applied to cloudflared pods.
-#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema)]
-#[serde(rename_all = "PascalCase")]
-pub enum UdpBufferTuningMode {
-    /// Disable UDP buffer tuning entirely. May result in QUIC performance warnings.
-    None,
-    /// Use a privileged init container to set sysctls (recommended for best compatibility).
-    /// This approach works in most Kubernetes clusters without requiring explicit sysctl allowlists.
-    PrivilegedInitContainer,
-    /// Use Kubernetes sysctls API via PodSecurityContext.
-    /// Requires the cluster to explicitly allow net.core.rmem_max and net.core.wmem_max sysctls.
-    /// May result in SysctlForbidden errors and failing pods in restrictive clusters.
-    KubernetesApi,
 }
 
 ///
