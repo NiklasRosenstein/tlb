@@ -295,10 +295,8 @@ const WELL_KNOWN_PORTS: &[(u16, &str)] = &[
 fn determine_port_protocol(port: &ServicePort, map_ports_annotation: Option<&str>) -> String {
     // 1. Check explicit map-ports annotation first
     if let Some(annotation) = map_ports_annotation {
-        // Handle port mappings in either format:
-        // - Legacy protocol format: "80:http,22:ssh"
+        // Handle port mappings in NetBird format:
         // - NetBird format: "443/tls:8080" (listen_port[/tls]:service_port)
-        // - Cloudflare format: "https:8080, ssh:2222" (protocol:service_port)
         for mapping in annotation.split(',') {
             let mapping = mapping.trim();
             if let Some((left_spec, right_spec)) = mapping.split_once(':') {
@@ -313,7 +311,7 @@ fn determine_port_protocol(port: &ServicePort, map_ports_annotation: Option<&str
                     || port.name.as_ref().map(|name| name == right_spec).unwrap_or(false);
 
                 if port_matches {
-                    // Try parsing as NetBird format first (numeric left_spec)
+                    // Parse NetBird format - left_spec should be a port number, optionally with /tls
                     if let Ok(_listen_port) = left_spec.strip_suffix("/tls").unwrap_or(left_spec).parse::<u16>() {
                         // This is NetBird format - for Cloudflare, we need to determine protocol from service port
                         // Use well-known port mappings or port name hints
@@ -340,17 +338,9 @@ fn determine_port_protocol(port: &ServicePort, map_ports_annotation: Option<&str
                             }
                         }
                         return "tcp".to_string();
-                    } else {
-                        // Not a number - this is Cloudflare format (protocol:service_port)
-                        return left_spec.to_string();
                     }
                 }
             }
-        }
-
-        // Legacy support: if no port-specific mapping found, check if it's a single protocol for all ports
-        if !annotation.contains(':') {
-            return annotation.to_string();
         }
     }
 
@@ -1295,28 +1285,6 @@ mod cloudflare_tests {
     use k8s_openapi::api::core::v1::ServicePort;
 
     #[test]
-    fn test_determine_port_protocol_with_cloudflare_format() {
-        let port = ServicePort {
-            name: Some("web".to_string()),
-            port: 8080,
-            protocol: Some("TCP".to_string()),
-            ..Default::default()
-        };
-
-        // Test Cloudflare format: "https:8080"
-        let result = determine_port_protocol(&port, Some("https:8080"));
-        assert_eq!(result, "https");
-
-        // Test Cloudflare format with multiple mappings: "http:80, https:8080"
-        let result = determine_port_protocol(&port, Some("http:80, https:8080"));
-        assert_eq!(result, "https");
-
-        // Test Cloudflare format with port name: "ssh:web"
-        let result = determine_port_protocol(&port, Some("ssh:web"));
-        assert_eq!(result, "ssh");
-    }
-
-    #[test]
     fn test_determine_port_protocol_with_netbird_format() {
         let port = ServicePort {
             name: Some("http".to_string()),
@@ -1346,25 +1314,6 @@ mod cloudflare_tests {
         };
         let result = determine_port_protocol(&https_port, Some("8443/tls:443"));
         assert_eq!(result, "https"); // Service port 443 is well-known HTTPS
-    }
-
-    #[test]
-    fn test_determine_port_protocol_legacy_format() {
-        let port = ServicePort {
-            name: Some("web".to_string()),
-            port: 8080,
-            protocol: Some("TCP".to_string()),
-            ..Default::default()
-        };
-
-        // Test legacy single protocol format
-        let result = determine_port_protocol(&port, Some("https"));
-        assert_eq!(result, "https");
-
-        // Test legacy port-specific format (old tlb.io/protocol style)
-        // This should be treated as Cloudflare format (protocol:service_port)
-        let result = determine_port_protocol(&port, Some("grpc:8080, http:80"));
-        assert_eq!(result, "grpc");
     }
 
     #[test]
@@ -1419,11 +1368,13 @@ mod cloudflare_tests {
             "test-service",
             "default",
             &ports,
-            Some("https:8080, ssh:2222"),
+            Some("443/tls:8080, 22:2222"),
         );
 
         assert!(config.contains("tunnel: test-tunnel-id"));
-        assert!(config.contains("service: https://test-service.default:8080"));
-        assert!(config.contains("service: ssh://test-service.default:2222"));
+        // Since we use NetBird format, protocols are determined from port characteristics
+        // Port 8080 with web name should get http protocol, and port 2222 should get tcp
+        assert!(config.contains("service: http://test-service.default:8080"));
+        assert!(config.contains("service: tcp://test-service.default:2222"));
     }
 }
