@@ -83,6 +83,10 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
+                  enableEbpfCapabilities:
+                    description: Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container. When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                    nullable: true
+                    type: boolean
                   image:
                     description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the controller.
                     nullable: true
@@ -224,6 +228,10 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
+                  enableEbpfCapabilities:
+                    description: Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container. When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                    nullable: true
+                    type: boolean
                   image:
                     description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the controller.
                     nullable: true

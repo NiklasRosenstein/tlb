@@ -251,7 +251,7 @@ impl TunnelProvider for NetbirdConfig {
                             &service.object_ref(&()),
                             EventType::Warning,
                             "InvalidPortMapping".into(),
-                            Some(format!("Invalid port mapping configuration: {}", err)),
+                            Some(format!("Invalid port mapping configuration: {err}")),
                             "Reconcile".into(),
                         )
                         .await?;
@@ -399,6 +399,15 @@ impl TunnelProvider for NetbirdConfig {
             ..Default::default()
         };
 
+        // Prepare capabilities list - always include NET_ADMIN
+        let mut capabilities = vec!["NET_ADMIN".into()];
+
+        // Add eBPF capabilities if enabled (defaults to true)
+        if self.enable_ebpf_capabilities.unwrap_or(true) {
+            capabilities.push("SYS_ADMIN".into());
+            capabilities.push("SYS_RESOURCE".into());
+        }
+
         let pod_spec = PodSpec {
             node_selector: Some(node_selector),
             affinity: Some(affinity),
@@ -409,7 +418,7 @@ impl TunnelProvider for NetbirdConfig {
                 env: Some(env),
                 security_context: Some(SecurityContext {
                     capabilities: Some(Capabilities {
-                        add: Some(vec!["NET_ADMIN".into()]),
+                        add: Some(capabilities),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -522,8 +531,7 @@ impl TunnelProvider for NetbirdConfig {
                                 EventType::Warning,
                                 "TLSSecretNotFound".into(),
                                 Some(format!(
-                                    "TLS secret '{}' not found in namespace '{}'",
-                                    tls_secret_name, svc_namespace
+                                    "TLS secret '{tls_secret_name}' not found in namespace '{svc_namespace}'"
                                 )),
                                 "Reconcile".into(),
                             )
@@ -729,8 +737,7 @@ impl TunnelProvider for NetbirdConfig {
             .await
             .map_err(|e| {
                 Error::UnexpectedError(format!(
-                    "Failed to list StatefulSets for service '{}' in namespace '{}': {}",
-                    svc_name, svc_namespace, e
+                    "Failed to list StatefulSets for service '{svc_name}' in namespace '{svc_namespace}': {e}"
                 ))
             })?;
 
@@ -742,8 +749,7 @@ impl TunnelProvider for NetbirdConfig {
                 .await
                 .map_err(|e| {
                     Error::UnexpectedError(format!(
-                        "Failed to delete StatefulSet '{}' for service '{}': {}",
-                        statefulset_name, svc_name, e
+                        "Failed to delete StatefulSet '{statefulset_name}' for service '{svc_name}': {e}"
                     ))
                 })?;
         }
@@ -756,8 +762,7 @@ impl TunnelProvider for NetbirdConfig {
             .await
             .map_err(|e| {
                 Error::UnexpectedError(format!(
-                    "Failed to list PVCs for service '{}' in namespace '{}': {}",
-                    svc_name, svc_namespace, e
+                    "Failed to list PVCs for service '{svc_name}' in namespace '{svc_namespace}': {e}"
                 ))
             })?;
 
@@ -766,8 +771,7 @@ impl TunnelProvider for NetbirdConfig {
             info!("Deleting PVC `{pvc_name}` for service `{svc_name}`");
             pvc_api.delete(pvc_name, &Default::default()).await.map_err(|e| {
                 Error::UnexpectedError(format!(
-                    "Failed to delete PVC '{}' for service '{}': {}",
-                    pvc_name, svc_name, e
+                    "Failed to delete PVC '{pvc_name}' for service '{svc_name}': {e}"
                 ))
             })?;
         }
@@ -888,31 +892,31 @@ mod tests {
         // Test valid mappings
         let mapping = crate::PortMapping::parse("443/tls:8080").unwrap();
         assert_eq!(mapping.listen_port, 443);
-        assert_eq!(mapping.listen_tls, true);
+        assert!(mapping.listen_tls);
         assert_eq!(mapping.service_port, "8080");
-        assert_eq!(mapping.service_tls, false);
-        assert_eq!(mapping.service_tls_verify, true);
+        assert!(!mapping.service_tls);
+        assert!(mapping.service_tls_verify);
 
         let mapping = crate::PortMapping::parse("80:http").unwrap();
         assert_eq!(mapping.listen_port, 80);
-        assert_eq!(mapping.listen_tls, false);
+        assert!(!mapping.listen_tls);
         assert_eq!(mapping.service_port, "http");
-        assert_eq!(mapping.service_tls, false);
-        assert_eq!(mapping.service_tls_verify, true);
+        assert!(!mapping.service_tls);
+        assert!(mapping.service_tls_verify);
 
         let mapping = crate::PortMapping::parse("443/tls:5001/tls-no-verify").unwrap();
         assert_eq!(mapping.listen_port, 443);
-        assert_eq!(mapping.listen_tls, true);
+        assert!(mapping.listen_tls);
         assert_eq!(mapping.service_port, "5001");
-        assert_eq!(mapping.service_tls, true);
-        assert_eq!(mapping.service_tls_verify, false);
+        assert!(mapping.service_tls);
+        assert!(!mapping.service_tls_verify);
 
         // Test multiple mappings
         let mappings = crate::PortMapping::parse_multiple("80:http, 443/tls:https").unwrap();
         assert_eq!(mappings.len(), 2);
         assert_eq!(mappings[0].listen_port, 80);
         assert_eq!(mappings[1].listen_port, 443);
-        assert_eq!(mappings[1].listen_tls, true);
+        assert!(mappings[1].listen_tls);
     }
 
     #[test]
@@ -1078,5 +1082,68 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.unwrap_err().to_string();
         assert!(error_message.contains("Port mapping references unknown service port 'invalid-port'"));
+    }
+
+    #[test]
+    fn test_ebpf_capabilities() {
+        use crate::crds::NetbirdConfig;
+
+        // Helper function to create a basic NetbirdConfig for testing
+        fn create_test_config(enable_ebpf: Option<bool>) -> NetbirdConfig {
+            NetbirdConfig {
+                management_url: "https://test.com".to_string(),
+                setup_key_ref: crate::crds::SeretKeyRef {
+                    name: "test".to_string(),
+                    namespace: None,
+                    key: "key".to_string(),
+                },
+                netbird_dns_domain: None,
+                image: None,
+                cluster_interface: None,
+                netbird_interface: None,
+                up_command: None,
+                announce_type: None,
+                resource_prefix: None,
+                storage_class: None,
+                size: None,
+                enable_ebpf_capabilities: enable_ebpf,
+            }
+        }
+
+        // Test default behavior (should enable eBPF capabilities)
+        let config = create_test_config(None);
+        let mut capabilities = vec!["NET_ADMIN".into()];
+        if config.enable_ebpf_capabilities.unwrap_or(true) {
+            capabilities.push("SYS_ADMIN".into());
+            capabilities.push("SYS_RESOURCE".into());
+        }
+        assert_eq!(capabilities.len(), 3);
+        assert!(capabilities.contains(&"NET_ADMIN".to_string()));
+        assert!(capabilities.contains(&"SYS_ADMIN".to_string()));
+        assert!(capabilities.contains(&"SYS_RESOURCE".to_string()));
+
+        // Test explicitly enabled
+        let config = create_test_config(Some(true));
+        let mut capabilities = vec!["NET_ADMIN".into()];
+        if config.enable_ebpf_capabilities.unwrap_or(true) {
+            capabilities.push("SYS_ADMIN".into());
+            capabilities.push("SYS_RESOURCE".into());
+        }
+        assert_eq!(capabilities.len(), 3);
+        assert!(capabilities.contains(&"NET_ADMIN".to_string()));
+        assert!(capabilities.contains(&"SYS_ADMIN".to_string()));
+        assert!(capabilities.contains(&"SYS_RESOURCE".to_string()));
+
+        // Test explicitly disabled
+        let config = create_test_config(Some(false));
+        let mut capabilities = vec!["NET_ADMIN".into()];
+        if config.enable_ebpf_capabilities.unwrap_or(true) {
+            capabilities.push("SYS_ADMIN".into());
+            capabilities.push("SYS_RESOURCE".into());
+        }
+        assert_eq!(capabilities.len(), 1);
+        assert!(capabilities.contains(&"NET_ADMIN".to_string()));
+        assert!(!capabilities.contains(&"SYS_ADMIN".to_string()));
+        assert!(!capabilities.contains(&"SYS_RESOURCE".to_string()));
     }
 }
