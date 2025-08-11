@@ -452,6 +452,27 @@ fn generate_cloudflared_config(
     config
 }
 
+/// Generates PodSecurityContext with UDP buffer tuning sysctls if enabled
+fn build_udp_buffer_tuning_security_context(enable_udp_buffer_tuning: Option<bool>) -> Option<PodSecurityContext> {
+    if enable_udp_buffer_tuning.unwrap_or(true) {
+        Some(PodSecurityContext {
+            sysctls: Some(vec![
+                Sysctl {
+                    name: "net.core.rmem_max".to_string(),
+                    value: "7500000".to_string(),
+                },
+                Sysctl {
+                    name: "net.core.wmem_max".to_string(),
+                    value: "7500000".to_string(),
+                },
+            ]),
+            ..Default::default()
+        })
+    } else {
+        None
+    }
+}
+
 /// Manages DNS records for a service - either creates or deletes them based on the operation
 /// Returns DnsManagementResult with both successful and failed hostnames
 async fn manage_dns_records(
@@ -944,23 +965,7 @@ impl CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
-                        security_context: if self.enable_udp_buffer_tuning.unwrap_or(true) {
-                            Some(PodSecurityContext {
-                                sysctls: Some(vec![
-                                    Sysctl {
-                                        name: "net.core.rmem_max".to_string(),
-                                        value: "7500000".to_string(),
-                                    },
-                                    Sysctl {
-                                        name: "net.core.wmem_max".to_string(),
-                                        value: "7500000".to_string(),
-                                    },
-                                ]),
-                                ..Default::default()
-                            })
-                        } else {
-                            None
-                        },
+                        security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
@@ -1210,6 +1215,7 @@ impl CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
+                        security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
