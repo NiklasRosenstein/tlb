@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::{
     Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{CloudflareAnnounceType, CloudflareConfig},
+    crds::{CloudflareAnnounceType, CloudflareConfig, UdpBufferTuningMode},
 };
 
 use crate::{FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL};
@@ -452,10 +452,12 @@ fn generate_cloudflared_config(
     config
 }
 
-/// Generates PodSecurityContext with UDP buffer tuning sysctls if enabled
-fn build_udp_buffer_tuning_security_context(enable_udp_buffer_tuning: Option<bool>) -> Option<PodSecurityContext> {
-    if enable_udp_buffer_tuning.unwrap_or(true) {
-        Some(PodSecurityContext {
+/// Generates PodSecurityContext with UDP buffer tuning sysctls if using KubernetesApi mode
+fn build_udp_buffer_tuning_security_context(
+    enable_udp_buffer_tuning: Option<UdpBufferTuningMode>,
+) -> Option<PodSecurityContext> {
+    match enable_udp_buffer_tuning.unwrap_or(UdpBufferTuningMode::PrivilegedInitContainer) {
+        UdpBufferTuningMode::KubernetesApi => Some(PodSecurityContext {
             sysctls: Some(vec![
                 Sysctl {
                     name: "net.core.rmem_max".to_string(),
@@ -467,9 +469,29 @@ fn build_udp_buffer_tuning_security_context(enable_udp_buffer_tuning: Option<boo
                 },
             ]),
             ..Default::default()
-        })
-    } else {
-        None
+        }),
+        UdpBufferTuningMode::None | UdpBufferTuningMode::PrivilegedInitContainer => None,
+    }
+}
+
+/// Generates init container for UDP buffer tuning if using PrivilegedInitContainer mode
+fn build_udp_buffer_tuning_init_container(enable_udp_buffer_tuning: Option<UdpBufferTuningMode>) -> Vec<Container> {
+    match enable_udp_buffer_tuning.unwrap_or(UdpBufferTuningMode::PrivilegedInitContainer) {
+        UdpBufferTuningMode::PrivilegedInitContainer => vec![Container {
+            name: "udp-buffer-tuning".to_string(),
+            image: Some("alpine:latest".to_string()),
+            command: Some(vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "sysctl -w net.core.rmem_max=7500000 && sysctl -w net.core.wmem_max=7500000".to_string(),
+            ]),
+            security_context: Some(k8s_openapi::api::core::v1::SecurityContext {
+                privileged: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        UdpBufferTuningMode::None | UdpBufferTuningMode::KubernetesApi => vec![],
     }
 }
 
@@ -966,6 +988,7 @@ impl CloudflareConfig {
                             }
                         }),
                         security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
+                        init_containers: Some(build_udp_buffer_tuning_init_container(self.enable_udp_buffer_tuning)),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
@@ -1216,6 +1239,7 @@ impl CloudflareConfig {
                             }
                         }),
                         security_context: build_udp_buffer_tuning_security_context(self.enable_udp_buffer_tuning),
+                        init_containers: Some(build_udp_buffer_tuning_init_container(self.enable_udp_buffer_tuning)),
                         containers: vec![Container {
                             name: "cloudflared".to_string(),
                             image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
