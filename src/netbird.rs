@@ -1083,6 +1083,4 @@ mod tests {
         let error_message = result.unwrap_err().to_string();
         assert!(error_message.contains("Port mapping references unknown service port 'invalid-port'"));
     }
-
-
 }
