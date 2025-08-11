@@ -447,6 +447,23 @@ For DNS record management with the `tlb.io/dns` annotation:
      least one DNS CNAME record could be successfully created and the Cloudflare TunnelClass spec does not override the
      `announceType` to `Internal`.
 
+3. **UDP Buffer Size Configuration**: To prevent "failed to sufficiently increase receive buffer size" warnings from
+   cloudflared, you may need to configure UDP buffer sizes on your Kubernetes nodes. Set these sysctls on each node:
+   ```bash
+   sysctl -w net.core.rmem_max=7500000
+   sysctl -w net.core.wmem_max=7500000
+   ```
+
+   To make these changes persistent across reboots, add them to `/etc/sysctl.conf` or create a file in `/etc/sysctl.d/`:
+   ```bash
+   echo 'net.core.rmem_max=7500000' >> /etc/sysctl.d/99-cloudflare-udp.conf
+   echo 'net.core.wmem_max=7500000' >> /etc/sysctl.d/99-cloudflare-udp.conf
+   ```
+
+   These settings must be applied at the host level and cannot be configured from within Kubernetes pods. For more
+   information about these settings, see the
+   [QUIC-GO UDP Buffer Sizes documentation](https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes).
+
 ### NetBird Setup
 
 1. **Management URL**: Point to your NetBird management server
