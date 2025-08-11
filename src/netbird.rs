@@ -647,8 +647,11 @@ impl TunnelProvider for NetbirdConfig {
             }
             None => {
                 // It does not exist, so create it.
-                statefulset_api.create(&PostParams::default(), &statefulset).await?;
-                info!("Created statefulset for service `{svc_name}`");
+                let sts = statefulset_api.create(&PostParams::default(), &statefulset).await?;
+                // Dump to yaml
+                let sts = serde_yaml::to_string(&sts)
+                    .map_err(|e| Error::UnexpectedError(format!("Failed to serialize StatefulSet: {e}")))?;
+                info!("Created statefulset for service `{svc_name}`: {sts}");
             }
         }
 
