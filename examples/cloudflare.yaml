@@ -21,13 +21,14 @@ stringData:
   token: Sq2z0C-4vIEG70H_MMgOtoBG5MkhxZRxYpL4fv9r
 
 ---
+# Example 1: Simple HTTP service using the new map-ports annotation
 apiVersion: v1
 kind: Service
 metadata:
   name: nginx-hello-world
   annotations:
     tlb.io/dns: hello.432372253.xyz
-    tlb.io/protocol: "http"
+    tlb.io/map-ports: "http:80"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/cloudflare
@@ -37,6 +38,54 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 80
+
+---
+# Example 2: Multi-port service with explicit protocol mapping (Cloudflare format)
+apiVersion: v1
+kind: Service
+metadata:
+  name: multi-port-service
+  annotations:
+    tlb.io/dns: multi.432372253.xyz
+    tlb.io/map-ports: "https:8080, ssh:2222"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/cloudflare
+  selector:
+    app: multi-port-app
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+      name: web
+    - protocol: TCP
+      port: 2222
+      targetPort: 22
+      name: ssh
+
+---
+# Example 3: Service compatible with NetBird-style port mapping format
+apiVersion: v1
+kind: Service
+metadata:
+  name: netbird-compat-service
+  annotations:
+    tlb.io/dns: compat.432372253.xyz
+    tlb.io/map-ports: "443:8443, 22:2222"  # NetBird format: listen_port:service_port
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/cloudflare
+  selector:
+    app: netbird-compat-app
+  ports:
+    - protocol: TCP
+      port: 8443
+      targetPort: 8443
+      name: https
+    - protocol: TCP
+      port: 2222
+      targetPort: 22
+      name: ssh
 
 ---
 apiVersion: apps/v1
@@ -58,3 +107,53 @@ spec:
           image: nginx:latest
           ports:
             - containerPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: multi-port-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: multi-port-app
+  template:
+    metadata:
+      labels:
+        app: multi-port-app
+    spec:
+      containers:
+        - name: web-server
+          image: nginx:latest
+          ports:
+            - containerPort: 8080
+        - name: ssh-server
+          image: lscr.io/linuxserver/openssh-server:latest
+          ports:
+            - containerPort: 22
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: netbird-compat-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: netbird-compat-app
+  template:
+    metadata:
+      labels:
+        app: netbird-compat-app
+    spec:
+      containers:
+        - name: https-server
+          image: nginx:latest
+          ports:
+            - containerPort: 8443
+        - name: ssh-server
+          image: lscr.io/linuxserver/openssh-server:latest
+          ports:
+            - containerPort: 22
