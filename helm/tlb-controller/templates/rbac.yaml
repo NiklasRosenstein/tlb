@@ -57,6 +57,7 @@ rules:
       - persistentvolumeclaims
     verbs:
       - delete
+      - list
   - apiGroups: ["events.k8s.io"]
     resources:
       - events
