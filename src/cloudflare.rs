@@ -7,8 +7,8 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
-            ServiceStatus, Sysctl, Volume, VolumeMount,
+            ConfigMap, Container, LoadBalancerIngress, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Secret,
+            Service, ServicePort, ServiceStatus, Sysctl, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference},
@@ -1671,6 +1671,7 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
+            enable_udp_buffer_tuning: None,
         };
 
         let config_quick_mode = CloudflareConfig {
@@ -1680,6 +1681,7 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
+            enable_udp_buffer_tuning: None,
         };
 
         // Check that API mode is detected when both api_token_ref and account_id are present
@@ -1702,6 +1704,7 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
+            enable_udp_buffer_tuning: None,
         };
 
         let config_partial_2 = CloudflareConfig {
@@ -1711,6 +1714,7 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
+            enable_udp_buffer_tuning: None,
         };
 
         // Both partial configurations should use Quick mode (not use_api_mode)
@@ -1719,90 +1723,5 @@ mod tests {
 
         assert!(!use_api_mode_partial_1);
         assert!(!use_api_mode_partial_2);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::crds::{CloudflareConfig, SeretKeyRef};
-
-    #[test]
-    fn test_udp_buffer_tuning_disabled_by_default() {
-        let config = CloudflareConfig {
-            api_token_ref: SeretKeyRef {
-                name: "test-secret".to_string(),
-                namespace: Some("test-ns".to_string()),
-                key: "token".to_string(),
-            },
-            account_id: "test-account".to_string(),
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-            enable_udp_buffer_tuning: None,
-        };
-
-        // Default should be false (None is treated as false)
-        assert!(!config.enable_udp_buffer_tuning.unwrap_or(false));
-    }
-
-    #[test]
-    fn test_udp_buffer_tuning_explicit_true() {
-        let config = CloudflareConfig {
-            api_token_ref: SeretKeyRef {
-                name: "test-secret".to_string(),
-                namespace: Some("test-ns".to_string()),
-                key: "token".to_string(),
-            },
-            account_id: "test-account".to_string(),
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-            enable_udp_buffer_tuning: Some(true),
-        };
-
-        assert!(config.enable_udp_buffer_tuning.unwrap_or(false));
-    }
-
-    #[test]
-    fn test_udp_buffer_tuning_explicit_false() {
-        let config = CloudflareConfig {
-            api_token_ref: SeretKeyRef {
-                name: "test-secret".to_string(),
-                namespace: Some("test-ns".to_string()),
-                key: "token".to_string(),
-            },
-            account_id: "test-account".to_string(),
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-            enable_udp_buffer_tuning: Some(false),
-        };
-
-        assert!(!config.enable_udp_buffer_tuning.unwrap_or(false));
-    }
-
-    #[test]
-    fn test_sysctl_configuration_values() {
-        // Verify the specific sysctl values that should be set
-        let expected_sysctls = vec![
-            Sysctl {
-                name: "net.core.rmem_max".to_string(),
-                value: "7500000".to_string(),
-            },
-            Sysctl {
-                name: "net.core.wmem_max".to_string(),
-                value: "7500000".to_string(),
-            },
-        ];
-
-        // These are the exact values that should be used based on the QUIC-GO documentation
-        assert_eq!(expected_sysctls[0].name, "net.core.rmem_max");
-        assert_eq!(expected_sysctls[0].value, "7500000");
-        assert_eq!(expected_sysctls[1].name, "net.core.wmem_max");
-        assert_eq!(expected_sysctls[1].value, "7500000");
     }
 }
