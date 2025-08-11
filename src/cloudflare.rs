@@ -240,9 +240,7 @@ impl CloudflareApi {
     async fn list_dns_records(&self, zone_id: &str, name: &str) -> anyhow::Result<Vec<DnsRecord>> {
         let res = self
             .client
-            .get(format!(
-                "{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records?name={name}"
-            ))
+            .get(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records?name={name}"))
             .send()
             .await?
             .text()
@@ -262,9 +260,7 @@ impl CloudflareApi {
     async fn delete_dns_record(&self, zone_id: &str, record_id: &str) -> anyhow::Result<()> {
         let res = self
             .client
-            .delete(format!(
-                "{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records/{record_id}"
-            ))
+            .delete(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records/{record_id}"))
             .send()
             .await?;
 
@@ -365,9 +361,8 @@ fn generate_cloudflared_config(
     ports: &[ServicePort],
     protocol_annotation: Option<&str>,
 ) -> String {
-    let mut config = format!(
-        "tunnel: {tunnel_id}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n"
-    );
+    let mut config =
+        format!("tunnel: {tunnel_id}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n");
 
     // Add ingress rules for each port
     for port in ports {
@@ -492,9 +487,7 @@ async fn manage_dns_records(
                     DnsOperation::Create => "creation",
                     DnsOperation::Delete => "cleanup",
                 };
-                error!(
-                    "Failed to find zone for hostname '{hostname}' during {action}: {e}"
-                );
+                error!("Failed to find zone for hostname '{hostname}' during {action}: {e}");
                 result
                     .failed_hostnames
                     .push((hostname.to_string(), format!("find zone during {action}: {e}")));
@@ -895,9 +888,7 @@ impl TunnelProvider for CloudflareConfig {
         match announce_type {
             CloudflareAnnounceType::Internal => {
                 // Internal mode: only use the tunnel hostname, no DNS record management
-                info!(
-                    "Using Internal announce mode for service '{svc_name}' - only tunnel hostname will be announced"
-                );
+                info!("Using Internal announce mode for service '{svc_name}' - only tunnel hostname will be announced");
                 ingress_hostnames.push(tunnel_hostname.clone());
             }
             CloudflareAnnounceType::External => {
@@ -951,9 +942,7 @@ impl TunnelProvider for CloudflareConfig {
                         }
                     }
                 } else {
-                    info!(
-                        "No DNS annotation found for service '{svc_name}' in External mode - using tunnel hostname"
-                    );
+                    info!("No DNS annotation found for service '{svc_name}' in External mode - using tunnel hostname");
                     // No DNS annotation in external mode - use tunnel hostname
                     ingress_hostnames.push(tunnel_hostname.clone());
                 }
@@ -1124,9 +1113,7 @@ impl TunnelProvider for CloudflareConfig {
                                                         )
                                                         .await
                                                     {
-                                                        log::warn!(
-                                                            "Failed to publish DNS deletion failure event: {e}"
-                                                        );
+                                                        log::warn!("Failed to publish DNS deletion failure event: {e}");
                                                     }
                                                 }
                                             } else {
@@ -1200,11 +1187,8 @@ impl TunnelProvider for CloudflareConfig {
                         cleanup_errors.join(", ")
                     );
                     // Track critical cleanup failure for service-level error handling
-                    critical_cleanup_errors.extend(
-                        cleanup_errors
-                            .iter()
-                            .map(|e| format!("secret '{secret_name}': {e}")),
-                    );
+                    critical_cleanup_errors
+                        .extend(cleanup_errors.iter().map(|e| format!("secret '{secret_name}': {e}")));
                     continue; // Skip deletion attempt, secret will remain
                 }
             }

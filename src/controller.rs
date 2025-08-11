@@ -199,9 +199,7 @@ async fn handle_service_finalizer(ctx: &ReconcileContext, service: &Service) -> 
                     cleanup_errors.push(format!("tunnel class '{tunnel_class_name}' not found"));
                 }
             } else {
-                error!(
-                    "Invalid tunnel class state '{state}' for service '{service_name}' during cleanup"
-                );
+                error!("Invalid tunnel class state '{state}' for service '{service_name}' during cleanup");
                 cleanup_errors.push(format!("invalid tunnel class state '{state}'"));
             }
         } else {
