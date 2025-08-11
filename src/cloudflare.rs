@@ -944,7 +944,7 @@ impl CloudflareConfig {
                                 ..Default::default()
                             }
                         }),
-                        security_context: if self.enable_udp_buffer_tuning.unwrap_or(false) {
+                        security_context: if self.enable_udp_buffer_tuning.unwrap_or(true) {
                             Some(PodSecurityContext {
                                 sysctls: Some(vec![
                                     Sysctl {

@@ -53,7 +53,7 @@ pub struct CloudflareConfig {
     pub announce_type: Option<CloudflareAnnounceType>,
     /// Enable UDP buffer tuning by setting net.core.rmem_max and net.core.wmem_max sysctls.
     /// This resolves the "failed to sufficiently increase receive buffer size" error from cloudflared.
-    /// Requires the cluster to allow these sysctls. Defaults to `false` for security reasons.
+    /// Requires the cluster to allow these sysctls. Defaults to `true`.
     pub enable_udp_buffer_tuning: Option<bool>,
 }
 
