@@ -1,0 +1,56 @@
+---
+# Example configuration for Cloudflare Quick tunnel mode
+# No API credentials required - creates temporary tunnels using cloudflared --url
+apiVersion: tlb.io/v1alpha1
+kind: ClusterTunnelClass
+metadata:
+  name: cloudflare-quick
+spec:
+  cloudflare:
+    # Quick tunnel mode - no API credentials required
+    tunnelMode: Quick
+    # Optional: Custom cloudflared image
+    # image: cloudflare/cloudflared:latest
+    # Optional: Custom resource prefix
+    # resourcePrefix: cf-quick-
+
+---
+# Example service using the quick tunnel mode
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-hello-world-quick
+  annotations:
+    # Note: DNS annotation is ignored in quick mode since we can't manage DNS without API access
+    # tlb.io/dns: hello-quick.example.com
+    tlb.io/protocol: "http"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/cloudflare-quick
+  selector:
+    app: nginx-hello-world
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-hello-world
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-hello-world
+  template:
+    metadata:
+      labels:
+        app: nginx-hello-world
+    spec:
+      containers:
+        - name: nginx-hello-world
+          image: nginx:latest
+          ports:
+            - containerPort: 80

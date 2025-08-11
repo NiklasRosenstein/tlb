@@ -38,17 +38,21 @@ pub struct TunnelClassInnerSpec {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudflareConfig {
-    pub api_token_ref: SeretKeyRef,
-    pub account_id: String,
+    /// Reference to secret containing Cloudflare API token. Required for API mode, ignored for Quick mode.
+    pub api_token_ref: Option<SeretKeyRef>,
+    /// Cloudflare account ID. Required for API mode, ignored for Quick mode.
+    pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
     pub image: Option<String>,
     /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
     pub resource_prefix: Option<String>,
-    /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+    /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
     pub tunnel_prefix: Option<String>,
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
+    /// Tunnel mode to use. Defaults to [`CloudflareTunnelMode::API`].
+    pub tunnel_mode: Option<CloudflareTunnelMode>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -66,6 +70,17 @@ pub enum CloudflareAnnounceType {
     /// If the DNS zone is not managed by the same Cloudflare account, this will not work. If the DNS zone cannot be
     /// edited, the provider will fall back to [`CloudflareAnnounceType::Internal`].
     External,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+pub enum CloudflareTunnelMode {
+    /// Use Cloudflare API to create and manage persistent tunnels. Requires api_token_ref and account_id.
+    /// Supports DNS record management and full tunnel lifecycle management.
+    API,
+    /// Use quick tunnel mode (`cloudflare tunnel --url`) without API credentials.
+    /// Creates temporary tunnels that only last while the pod is running.
+    /// Does not support DNS record management or persistent tunnel configuration.
+    Quick,
 }
 
 ///
