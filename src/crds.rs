@@ -51,7 +51,6 @@ pub struct CloudflareConfig {
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
-
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -70,7 +69,6 @@ pub enum CloudflareAnnounceType {
     /// edited, the provider will fall back to [`CloudflareAnnounceType::Internal`].
     External,
 }
-
 
 ///
 /// Configuration for creating Netbird tunnels.

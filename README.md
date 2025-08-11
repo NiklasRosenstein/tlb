@@ -77,7 +77,8 @@ curl $HOSTNAME
 # ...
 ```
 
-This creates a publicly accessible nginx service without requiring any Cloudflare account or API credentials! The tunnel URL is automatically generated and extracted from the cloudflared logs.
+This creates a publicly accessible nginx service without requiring any Cloudflare account or API credentials! The tunnel
+URL is automatically generated and extracted from the cloudflared logs.
 
 ## 🌐 Supported Providers
 

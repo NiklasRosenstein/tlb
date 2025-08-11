@@ -623,9 +623,6 @@ impl TunnelProvider for CloudflareConfig {
             block_owner_deletion: Some(true),
         }];
 
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-
         // Parse service annotations using the existing ServiceAnnotations struct
         let service_annotations =
             ServiceAnnotations::from(service.metadata.annotations.as_ref().cloned().unwrap_or_default());
@@ -672,9 +669,6 @@ impl TunnelProvider for CloudflareConfig {
     }
 
     async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-
         // Determine tunnel mode based on presence of API credentials
         // Use Quick mode if no API credentials are provided, otherwise use API mode
         let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
@@ -1705,7 +1699,7 @@ mod tests {
         // Both partial configurations should use Quick mode (not use_api_mode)
         let use_api_mode_partial_1 = config_partial_1.api_token_ref.is_some() && config_partial_1.account_id.is_some();
         let use_api_mode_partial_2 = config_partial_2.api_token_ref.is_some() && config_partial_2.account_id.is_some();
-        
+
         assert!(!use_api_mode_partial_1);
         assert!(!use_api_mode_partial_2);
     }
