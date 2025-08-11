@@ -48,6 +48,37 @@ spec:
 
 > **Note:** If both `TunnelClass` and `ClusterTunnelClass` exist with the same name, the `TunnelClass` takes precedence.
 
+## ⚡ Quickstart Demo
+
+Want to quickly expose a service to the public internet using Cloudflare tunnels? Here's a complete walkthrough:
+
+```bash
+# 1. Create a local Kubernetes cluster
+kind cluster create
+
+# 2. Install TLB controller from this repository
+helm install tlb-controller ./helm/tlb-controller
+
+# 3. Apply the Cloudflare quick mode example
+kubectl apply -f examples/cloudflare-quick.yaml
+
+# 4. Wait for the tunnel URL to be available (may take 1-2 minutes)
+kubectl get service nginx-hello-world-quick -w
+
+# 5. Extract the tunnel hostname and test
+HOSTNAME=$(kubectl get service nginx-hello-world-quick -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+curl $HOSTNAME
+
+# Expected output:
+# <!DOCTYPE html>
+# <html>
+# <head>
+# <title>Welcome to nginx!</title>
+# ...
+```
+
+This creates a publicly accessible nginx service without requiring any Cloudflare account or API credentials! The tunnel URL is automatically generated and extracted from the cloudflared logs.
+
 ## 🌐 Supported Providers
 
 | Provider                                                                                        | Status     | DNS Management     | Protocols                  | High Availability    |
