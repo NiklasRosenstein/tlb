@@ -51,8 +51,7 @@ pub struct CloudflareConfig {
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
-    /// Tunnel mode to use. Defaults to [`CloudflareTunnelMode::API`].
-    pub tunnel_mode: Option<CloudflareTunnelMode>,
+
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -72,16 +71,6 @@ pub enum CloudflareAnnounceType {
     External,
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
-pub enum CloudflareTunnelMode {
-    /// Use Cloudflare API to create and manage persistent tunnels. Requires api_token_ref and account_id.
-    /// Supports DNS record management and full tunnel lifecycle management.
-    API,
-    /// Use quick tunnel mode (`cloudflare tunnel --url`) without API credentials.
-    /// Creates temporary tunnels that only last while the pod is running.
-    /// Does not support DNS record management or persistent tunnel configuration.
-    Quick,
-}
 
 ///
 /// Configuration for creating Netbird tunnels.

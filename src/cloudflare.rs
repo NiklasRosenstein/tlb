@@ -25,7 +25,7 @@ use serde_json::json;
 
 use crate::{
     Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{CloudflareAnnounceType, CloudflareConfig, CloudflareTunnelMode},
+    crds::{CloudflareAnnounceType, CloudflareConfig},
 };
 
 use crate::{FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL};
@@ -644,32 +644,30 @@ impl TunnelProvider for CloudflareConfig {
             .and_then(|annotations| annotations.get("tlb.io/protocol"))
             .map(|s| s.as_str());
 
-        // Determine tunnel mode (default to API for backward compatibility)
-        let tunnel_mode = self.tunnel_mode.as_ref().unwrap_or(&CloudflareTunnelMode::API);
+        // Determine tunnel mode based on presence of API credentials
+        // Use Quick mode if no API credentials are provided, otherwise use API mode
+        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
 
-        match tunnel_mode {
-            CloudflareTunnelMode::API => {
-                self.reconcile_service_api_mode(
-                    ctx,
-                    service,
-                    owner_references,
-                    service_annotations,
-                    ports,
-                    protocol_annotation,
-                )
-                .await
-            }
-            CloudflareTunnelMode::Quick => {
-                self.reconcile_service_quick_mode(
-                    ctx,
-                    service,
-                    owner_references,
-                    service_annotations,
-                    ports,
-                    protocol_annotation,
-                )
-                .await
-            }
+        if use_api_mode {
+            self.reconcile_service_api_mode(
+                ctx,
+                service,
+                owner_references,
+                service_annotations,
+                ports,
+                protocol_annotation,
+            )
+            .await
+        } else {
+            self.reconcile_service_quick_mode(
+                ctx,
+                service,
+                owner_references,
+                service_annotations,
+                ports,
+                protocol_annotation,
+            )
+            .await
         }
     }
 
@@ -677,12 +675,14 @@ impl TunnelProvider for CloudflareConfig {
         let svc_name = service.name_any();
         let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
 
-        // Determine tunnel mode (default to API for backward compatibility)
-        let tunnel_mode = self.tunnel_mode.as_ref().unwrap_or(&CloudflareTunnelMode::API);
+        // Determine tunnel mode based on presence of API credentials
+        // Use Quick mode if no API credentials are provided, otherwise use API mode
+        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
 
-        match tunnel_mode {
-            CloudflareTunnelMode::API => self.cleanup_service_api_mode(ctx, service).await,
-            CloudflareTunnelMode::Quick => self.cleanup_service_quick_mode(ctx, service).await,
+        if use_api_mode {
+            self.cleanup_service_api_mode(ctx, service).await
+        } else {
+            self.cleanup_service_quick_mode(ctx, service).await
         }
     }
 }
@@ -1647,27 +1647,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cloudflare_tunnel_mode_serialization() {
-        // Test that our CloudflareTunnelMode enum can be serialized/deserialized correctly
-        let api_mode = CloudflareTunnelMode::API;
-        let quick_mode = CloudflareTunnelMode::Quick;
-
-        let api_json = serde_json::to_string(&api_mode).unwrap();
-        let quick_json = serde_json::to_string(&quick_mode).unwrap();
-
-        assert_eq!(api_json, "\"API\"");
-        assert_eq!(quick_json, "\"Quick\"");
-
-        let api_deserialized: CloudflareTunnelMode = serde_json::from_str(&api_json).unwrap();
-        let quick_deserialized: CloudflareTunnelMode = serde_json::from_str(&quick_json).unwrap();
-
-        assert!(matches!(api_deserialized, CloudflareTunnelMode::API));
-        assert!(matches!(quick_deserialized, CloudflareTunnelMode::Quick));
-    }
-
-    #[test]
-    fn test_cloudflare_config_with_optional_fields() {
-        // Test that CloudflareConfig can work with optional fields
+    fn test_cloudflare_config_tunnel_mode_detection() {
+        // Test that tunnel mode is automatically determined by presence of API credentials
         let config_api_mode = CloudflareConfig {
             api_token_ref: Some(crate::crds::SeretKeyRef {
                 name: "my-secret".to_string(),
@@ -1679,7 +1660,6 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            tunnel_mode: Some(CloudflareTunnelMode::API),
         };
 
         let config_quick_mode = CloudflareConfig {
@@ -1689,22 +1669,44 @@ mod tests {
             resource_prefix: None,
             tunnel_prefix: None,
             announce_type: None,
-            tunnel_mode: Some(CloudflareTunnelMode::Quick),
         };
 
-        // Serialize and check structure
-        let api_json = serde_json::to_value(&config_api_mode).unwrap();
-        let quick_json = serde_json::to_value(&config_quick_mode).unwrap();
-
-        assert_eq!(api_json["tunnelMode"], "API");
-        assert_eq!(quick_json["tunnelMode"], "Quick");
-
-        // Check that API mode requires account_id and api_token_ref
+        // Check that API mode is detected when both api_token_ref and account_id are present
         assert!(config_api_mode.api_token_ref.is_some());
         assert!(config_api_mode.account_id.is_some());
 
-        // Check that Quick mode doesn't require them
+        // Check that Quick mode is detected when API credentials are absent
         assert!(config_quick_mode.api_token_ref.is_none());
         assert!(config_quick_mode.account_id.is_none());
+
+        // Test partial credentials (should use Quick mode)
+        let config_partial_1 = CloudflareConfig {
+            api_token_ref: Some(crate::crds::SeretKeyRef {
+                name: "my-secret".to_string(),
+                namespace: Some("default".to_string()),
+                key: "token".to_string(),
+            }),
+            account_id: None, // Missing account_id
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        let config_partial_2 = CloudflareConfig {
+            api_token_ref: None, // Missing api_token_ref
+            account_id: Some("test-account".to_string()),
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        // Both partial configurations should use Quick mode (not use_api_mode)
+        let use_api_mode_partial_1 = config_partial_1.api_token_ref.is_some() && config_partial_1.account_id.is_some();
+        let use_api_mode_partial_2 = config_partial_2.api_token_ref.is_some() && config_partial_2.account_id.is_some();
+        
+        assert!(!use_api_mode_partial_1);
+        assert!(!use_api_mode_partial_2);
     }
 }

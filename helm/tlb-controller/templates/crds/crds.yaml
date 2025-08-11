@@ -60,13 +60,6 @@ spec:
                     description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
                     nullable: true
                     type: string
-                  tunnelMode:
-                    description: Tunnel mode to use. Defaults to [`CloudflareTunnelMode::API`].
-                    enum:
-                    - API
-                    - Quick
-                    nullable: true
-                    type: string
                   tunnelPrefix:
                     description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
                     nullable: true
@@ -210,13 +203,6 @@ spec:
                     type: string
                   resourcePrefix:
                     description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
-                    nullable: true
-                    type: string
-                  tunnelMode:
-                    description: Tunnel mode to use. Defaults to [`CloudflareTunnelMode::API`].
-                    enum:
-                    - API
-                    - Quick
                     nullable: true
                     type: string
                   tunnelPrefix:
