@@ -1,24 +1,18 @@
 ---
-# Example configuration for Cloudflare Quick tunnel mode
-# Quick mode is automatically selected when no API credentials (apiTokenRef/accountId) are provided
 apiVersion: tlb.io/v1alpha1
 kind: ClusterTunnelClass
 metadata:
   name: cloudflare-quick
 spec:
-  cloudflare:
-    # Quick mode: no API credentials needed (omit apiTokenRef and accountId)
-    image: cloudflare/cloudflared:latest
+  # Quick mode: no API credentials needed (omit apiTokenRef and accountId)
+  cloudflare: {}
 
 ---
-# Example service using the quick tunnel mode
 apiVersion: v1
 kind: Service
 metadata:
   name: nginx-hello-world-quick
   annotations:
-    # Note: DNS annotation is ignored in quick mode since we can't manage DNS without API credentials
-    # tlb.io/dns: hello-quick.example.com
     tlb.io/protocol: "http"
 spec:
   type: LoadBalancer
