@@ -94,7 +94,7 @@ fn get_netbird_launch_script(
     let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
 
     // Install socat if it's not already installed.
-    launch_script.push("if ! command socat >/dev/null; then apk add --no-cache socat; fi".to_owned());
+    launch_script.push("if ! command socat >/dev/null 2>&1; then apk add --no-cache socat; fi".to_owned());
 
     if let Some(mappings) = port_mappings {
         // Use custom port mappings
