@@ -27,6 +27,8 @@ spec:
                 nullable: true
                 properties:
                   accountId:
+                    description: Cloudflare account ID. Required for API mode, ignored for Quick mode.
+                    nullable: true
                     type: string
                   announceType:
                     description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
@@ -36,7 +38,8 @@ spec:
                     nullable: true
                     type: string
                   apiTokenRef:
-                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    description: Reference to secret containing Cloudflare API token. Required for API mode, ignored for Quick mode.
+                    nullable: true
                     properties:
                       key:
                         type: string
@@ -62,12 +65,9 @@ spec:
                     nullable: true
                     type: string
                   tunnelPrefix:
-                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
                     nullable: true
                     type: string
-                required:
-                - accountId
-                - apiTokenRef
                 type: object
               netbird:
                 description: |-
@@ -176,6 +176,8 @@ spec:
                 nullable: true
                 properties:
                   accountId:
+                    description: Cloudflare account ID. Required for API mode, ignored for Quick mode.
+                    nullable: true
                     type: string
                   announceType:
                     description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
@@ -185,7 +187,8 @@ spec:
                     nullable: true
                     type: string
                   apiTokenRef:
-                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    description: Reference to secret containing Cloudflare API token. Required for API mode, ignored for Quick mode.
+                    nullable: true
                     properties:
                       key:
                         type: string
@@ -211,12 +214,9 @@ spec:
                     nullable: true
                     type: string
                   tunnelPrefix:
-                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+                    description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
                     nullable: true
                     type: string
-                required:
-                - accountId
-                - apiTokenRef
                 type: object
               netbird:
                 description: |-

@@ -38,13 +38,15 @@ pub struct TunnelClassInnerSpec {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudflareConfig {
-    pub api_token_ref: SeretKeyRef,
-    pub account_id: String,
+    /// Reference to secret containing Cloudflare API token. Required for API mode, ignored for Quick mode.
+    pub api_token_ref: Option<SeretKeyRef>,
+    /// Cloudflare account ID. Required for API mode, ignored for Quick mode.
+    pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
     pub image: Option<String>,
     /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
     pub resource_prefix: Option<String>,
-    /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`.
+    /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
     pub tunnel_prefix: Option<String>,
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].

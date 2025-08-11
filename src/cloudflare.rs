@@ -7,7 +7,7 @@ use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, PodSecurityContext, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
+            ConfigMap, Container, LoadBalancerIngress, Pod, PodSecurityContext, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
             ServiceStatus, Sysctl, Volume, VolumeMount,
         },
     },
@@ -15,7 +15,7 @@ use k8s_openapi::{
 };
 use kube::{
     Resource,
-    api::{Api, Patch, PatchParams, PostParams, ResourceExt},
+    api::{Api, LogParams, Patch, PatchParams, PostParams, ResourceExt},
 };
 use log::{error, info};
 use rand::RngCore;
@@ -35,6 +35,7 @@ const DEFAULT_CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared:latest";
 const CLOUDFLARE_API_URL: &str = "https://api.cloudflare.com/client/v4";
 const DEFAULT_RESOURCE_PREFIX: &str = "cf-";
 const DEFAULT_TUNNEL_PREFIX: &str = "kube-";
+const TUNNEL_URL_ANNOTATION: &str = "controller.tlb.io/cloudflare-quick-tunnel-url";
 
 #[derive(Deserialize, Debug)]
 struct CloudflareApiMsg {
@@ -99,6 +100,82 @@ struct CreateTunnelPayload<'a> {
     name: &'a str,
     config_src: &'a str,
     tunnel_secret: &'a str,
+}
+
+/// Extracts the Cloudflare tunnel URL from pod logs
+/// Looks for the pattern: "https://....trycloudflare.com" in the logs
+async fn extract_tunnel_url_from_logs(
+    client: kube::Client,
+    namespace: &str,
+    deployment_name: &str,
+) -> Result<Option<String>> {
+    let pod_api: Api<Pod> = Api::namespaced(client, namespace);
+
+    // Find pods for this deployment
+    let label_selector = format!("app={deployment_name}");
+    let pods = pod_api
+        .list(&kube::api::ListParams::default().labels(&label_selector))
+        .await?;
+
+    for pod in pods.items {
+        if let Some(pod_name) = &pod.metadata.name {
+            // Check if pod is running
+            if let Some(status) = &pod.status {
+                if let Some(phase) = &status.phase {
+                    if phase != "Running" {
+                        continue;
+                    }
+                }
+            }
+
+            // Get logs from the cloudflared container
+            let log_params = LogParams {
+                container: Some("cloudflared".to_string()),
+                tail_lines: Some(100), // Look at recent logs
+                ..Default::default()
+            };
+
+            match pod_api.logs(pod_name, &log_params).await {
+                Ok(logs) => {
+                    // Look for the tunnel URL pattern in logs
+                    for line in logs.lines() {
+                        if let Some(url) = extract_url_from_log_line(line) {
+                            info!("Found tunnel URL in logs: {url}");
+                            return Ok(Some(url));
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Continue to next pod if logs aren't available yet
+                    info!("Could not get logs from pod {pod_name}: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Extracts URL from a single log line if it matches the tunnel announcement pattern
+fn extract_url_from_log_line(line: &str) -> Option<String> {
+    // Look for the pattern: "https://....trycloudflare.com"
+    // The logs contain lines like:
+    // "2025-08-11T15:39:42Z INF |  https://coins-mj-geographical-inquire.trycloudflare.com  |"
+    if line.contains("trycloudflare.com") {
+        // Extract URL using regex-like pattern matching
+        if let Some(start) = line.find("https://") {
+            if let Some(end) = line[start..].find(" ") {
+                return Some(line[start..start + end].trim().to_string());
+            } else {
+                // URL might be at the end of the line
+                let url = line[start..].trim().trim_end_matches('|').trim();
+                if url.ends_with("trycloudflare.com") {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 impl CloudflareApi {
@@ -546,9 +623,6 @@ impl TunnelProvider for CloudflareConfig {
             block_owner_deletion: Some(true),
         }];
 
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-
         // Parse service annotations using the existing ServiceAnnotations struct
         let service_annotations =
             ServiceAnnotations::from(service.metadata.annotations.as_ref().cloned().unwrap_or_default());
@@ -567,17 +641,81 @@ impl TunnelProvider for CloudflareConfig {
             .and_then(|annotations| annotations.get("tlb.io/protocol"))
             .map(|s| s.as_str());
 
-        // Validate api_token_ref configuration first
-        if self.api_token_ref.name.is_empty() || self.api_token_ref.key.is_empty() {
+        // Determine tunnel mode based on presence of API credentials
+        // Use Quick mode if no API credentials are provided, otherwise use API mode
+        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
+
+        if use_api_mode {
+            self.reconcile_service_api_mode(
+                ctx,
+                service,
+                owner_references,
+                service_annotations,
+                ports,
+                protocol_annotation,
+            )
+            .await
+        } else {
+            self.reconcile_service_quick_mode(
+                ctx,
+                service,
+                owner_references,
+                service_annotations,
+                ports,
+                protocol_annotation,
+            )
+            .await
+        }
+    }
+
+    async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+        // Determine tunnel mode based on presence of API credentials
+        // Use Quick mode if no API credentials are provided, otherwise use API mode
+        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
+
+        if use_api_mode {
+            self.cleanup_service_api_mode(ctx, service).await
+        } else {
+            self.cleanup_service_quick_mode(ctx, service).await
+        }
+    }
+}
+
+impl CloudflareConfig {
+    async fn reconcile_service_api_mode(
+        &self,
+        ctx: &ReconcileContext,
+        service: &Service,
+        owner_references: Vec<OwnerReference>,
+        service_annotations: ServiceAnnotations,
+        ports: Vec<ServicePort>,
+        protocol_annotation: Option<&str>,
+    ) -> Result<()> {
+        let svc_name = service.name_any();
+        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
+
+        // Validate api_token_ref and account_id configuration for API mode
+        let api_token_ref = self.api_token_ref.as_ref().ok_or_else(|| {
+            Error::ConfigError(format!(
+                "API mode requires api_token_ref to be set for service '{svc_name}'"
+            ))
+        })?;
+        let account_id = self.account_id.as_ref().ok_or_else(|| {
+            Error::ConfigError(format!(
+                "API mode requires account_id to be set for service '{svc_name}'"
+            ))
+        })?;
+
+        if api_token_ref.name.is_empty() || api_token_ref.key.is_empty() {
             return Err(Error::ConfigError(format!(
                 "Invalid Cloudflare configuration for service '{}': api_token_ref name='{}' key='{}' cannot be empty",
-                svc_name, self.api_token_ref.name, self.api_token_ref.key
+                svc_name, api_token_ref.name, api_token_ref.key
             )));
         }
 
         let api_token = crate::get_secret_value(
             &ctx.client,
-            &self.api_token_ref,
+            api_token_ref,
             &svc_namespace,
         )
         .await
@@ -586,7 +724,7 @@ impl TunnelProvider for CloudflareConfig {
             svc_name, svc_namespace, e, file!(), line!()
         )))?;
 
-        let cf_client = CloudflareApi::new(&api_token, &self.account_id);
+        let cf_client = CloudflareApi::new(&api_token, account_id);
 
         let resource_prefix = self
             .resource_prefix
@@ -659,7 +797,7 @@ impl TunnelProvider for CloudflareConfig {
 
             // Create the credentials.json file for cloudflared
             let credentials_json = json!({
-                "AccountTag": self.account_id,
+                "AccountTag": account_id,
                 "TunnelSecret": tunnel_secret,
                 "TunnelID": tunnel.id
             });
@@ -994,16 +1132,208 @@ impl TunnelProvider for CloudflareConfig {
         Ok(())
     }
 
-    async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+    async fn reconcile_service_quick_mode(
+        &self,
+        ctx: &ReconcileContext,
+        service: &Service,
+        owner_references: Vec<OwnerReference>,
+        _service_annotations: ServiceAnnotations,
+        ports: Vec<ServicePort>,
+        protocol_annotation: Option<&str>,
+    ) -> Result<()> {
+        let svc_name = service.name_any();
+        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
+
+        info!("Using Cloudflare Quick tunnel mode for service '{svc_name}' - no API credentials required");
+
+        let resource_prefix = self
+            .resource_prefix
+            .clone()
+            .unwrap_or(DEFAULT_RESOURCE_PREFIX.to_string());
+
+        // For quick mode, we create a deployment that runs cloudflared with --url
+        // The tunnel URL will be extracted from the container logs
+        let deployment_name = format!("{resource_prefix}{svc_name}");
+        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
+
+        // Generate the service URL for the quick tunnel
+        // For quick mode, we connect to the first port of the service
+        let service_url = if let Some(port) = ports.first() {
+            let protocol = determine_port_protocol(port, protocol_annotation);
+            format!("{}://{}.{}:{}", protocol, svc_name, svc_namespace, port.port)
+        } else {
+            return Err(Error::ConfigError(format!(
+                "Service '{svc_name}' has no ports defined - cannot create quick tunnel"
+            )));
+        };
+
+        let deployment = Deployment {
+            metadata: ObjectMeta {
+                name: Some(deployment_name.clone()),
+                namespace: Some(svc_namespace.clone()),
+                owner_references: Some(owner_references),
+                labels: Some(BTreeMap::from([
+                    (
+                        FOR_TUNNEL_CLASS_LABEL.to_string(),
+                        ctx.metadata.name.as_ref().unwrap().to_string(),
+                    ),
+                    (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
+                    (PROVIDER_LABEL.to_string(), "cloudflare".to_string()),
+                ])),
+                ..Default::default()
+            },
+            spec: Some(DeploymentSpec {
+                replicas: Some(1),
+                strategy: Some(DeploymentStrategy {
+                    type_: Some("RollingUpdate".to_string()),
+                    rolling_update: Some(RollingUpdateDeployment {
+                        max_surge: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1)),
+                        max_unavailable: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0)),
+                    }),
+                }),
+                selector: LabelSelector {
+                    match_labels: Some(BTreeMap::from([("app".to_string(), deployment_name.clone())])),
+                    match_expressions: None,
+                },
+                template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(BTreeMap::from([
+                            ("app".to_string(), deployment_name.clone()),
+                            ("controller.tlb.io/tunnel-mode".to_string(), "quick".to_string()),
+                        ])),
+                        ..Default::default()
+                    }),
+                    spec: Some(PodSpec {
+                        affinity: crate::build_pod_affinity_for_service(service).map(|pod_affinity| {
+                            k8s_openapi::api::core::v1::Affinity {
+                                pod_affinity: Some(pod_affinity),
+                                ..Default::default()
+                            }
+                        }),
+                        containers: vec![Container {
+                            name: "cloudflared".to_string(),
+                            image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
+                            args: Some(vec![
+                                "tunnel".to_string(),
+                                "--no-autoupdate".to_string(),
+                                "--url".to_string(),
+                                service_url,
+                            ]),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        deployment_api
+            .patch(
+                &deployment_name,
+                &PatchParams::apply("tlb-controller"),
+                &Patch::Apply(&deployment),
+            )
+            .await?;
+
+        info!("Reconciled cloudflared deployment {deployment_name} for service {svc_name} in quick mode");
+
+        // Check if we already have the tunnel URL cached in service annotations
+        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
+        let mut tunnel_url = service
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(TUNNEL_URL_ANNOTATION))
+            .cloned();
+
+        // If not cached, try to extract it from pod logs
+        if tunnel_url.is_none() {
+            if let Ok(Some(url)) =
+                extract_tunnel_url_from_logs(ctx.client.clone(), &svc_namespace, &deployment_name).await
+            {
+                tunnel_url = Some(url.clone());
+
+                // Cache the tunnel URL in service annotations
+                let patch = json!({
+                    "metadata": {
+                        "annotations": {
+                            TUNNEL_URL_ANNOTATION: url
+                        }
+                    }
+                });
+
+                if let Err(e) = svc_api
+                    .patch(&svc_name, &PatchParams::apply("tlb-controller"), &Patch::Merge(&patch))
+                    .await
+                {
+                    error!("Failed to cache tunnel URL in service annotations: {e}");
+                }
+            }
+        }
+
+        // Use the tunnel URL if found, otherwise return empty list
+        let ingress_hostnames = if let Some(url) = tunnel_url {
+            // Extract hostname from URL (remove https:// prefix)
+            let hostname = url.strip_prefix("https://").unwrap_or(&url).to_string();
+            vec![hostname]
+        } else {
+            vec![]
+        };
+
+        let ingress: Vec<LoadBalancerIngress> = ingress_hostnames
+            .into_iter()
+            .map(|hostname| LoadBalancerIngress {
+                hostname: Some(hostname),
+                ..Default::default()
+            })
+            .collect();
+
+        let status = ServiceStatus {
+            load_balancer: Some(k8s_openapi::api::core::v1::LoadBalancerStatus { ingress: Some(ingress) }),
+            ..Default::default()
+        };
+
+        let new_status = Patch::Apply(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "status": status
+        }));
+
+        let ps = PatchParams::apply("tlb-controller").force();
+        svc_api.patch_status(&svc_name, &ps, &new_status).await?;
+
+        info!("Patched status for service `{svc_name}` in quick mode");
+
+        Ok(())
+    }
+
+    async fn cleanup_service_api_mode(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
         let svc_name = service.name_any();
         let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
         let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
 
-        // Validate api_token_ref configuration first
-        if self.api_token_ref.name.is_empty() || self.api_token_ref.key.is_empty() {
+        // Validate api_token_ref configuration first for API mode
+        let api_token_ref = self.api_token_ref.as_ref();
+        let account_id = self.account_id.as_ref();
+
+        if api_token_ref.is_none() || account_id.is_none() {
+            error!(
+                "Invalid Cloudflare configuration for service '{svc_name}': API mode requires api_token_ref and account_id"
+            );
+            return Err(Error::ConfigError(
+                "Invalid Cloudflare configuration: API mode requires api_token_ref and account_id".to_string(),
+            ));
+        }
+
+        let api_token_ref = api_token_ref.unwrap();
+        let account_id = account_id.unwrap();
+
+        if api_token_ref.name.is_empty() || api_token_ref.key.is_empty() {
             error!(
                 "Invalid Cloudflare configuration for service '{}': api_token_ref name='{}' key='{}' cannot be empty",
-                svc_name, self.api_token_ref.name, self.api_token_ref.key
+                svc_name, api_token_ref.name, api_token_ref.key
             );
             return Err(Error::ConfigError(
                 "Invalid Cloudflare configuration: api_token_ref name and key cannot be empty".to_string(),
@@ -1011,18 +1341,16 @@ impl TunnelProvider for CloudflareConfig {
         }
 
         // Get API token for cleanup operations
-        let api_token = match crate::get_secret_value(&ctx.client, &self.api_token_ref, &svc_namespace).await {
+        let api_token = match crate::get_secret_value(&ctx.client, api_token_ref, &svc_namespace).await {
             Ok(token) => Some(token),
             Err(e) => {
-                error!("Failed to get API token secret '{:?}': {}", self.api_token_ref, e);
+                error!("Failed to get API token secret '{api_token_ref:?}': {e}");
                 // Continue with Kubernetes resource cleanup even if API access fails
                 None
             }
         };
 
-        let cf_client_opt = api_token
-            .as_ref()
-            .map(|token| CloudflareApi::new(token, &self.account_id));
+        let cf_client_opt = api_token.as_ref().map(|token| CloudflareApi::new(token, account_id));
 
         // Parse service annotations to potentially use in secret cleanup
         let service_annotations =
@@ -1276,6 +1604,121 @@ impl TunnelProvider for CloudflareConfig {
         }
 
         Ok(())
+    }
+
+    async fn cleanup_service_quick_mode(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+        let svc_name = service.name_any();
+        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
+        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
+
+        info!("Cleaning up Cloudflare Quick tunnel mode resources for service '{svc_name}'");
+
+        // Use label selectors to find resources
+        let label_selector = format!(
+            "{}={},{}={},{}={}",
+            crate::FOR_SERVICE_LABEL,
+            svc_name,
+            crate::FOR_TUNNEL_CLASS_LABEL,
+            tunnel_class_name,
+            crate::PROVIDER_LABEL,
+            "cloudflare"
+        );
+
+        // Clean up Deployments (no secrets or configmaps in quick mode)
+        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
+        let deployments = deployment_api
+            .list(&kube::api::ListParams::default().labels(&label_selector))
+            .await
+            .map_err(|e| {
+                Error::CloudflareError(format!(
+                    "Failed to list Deployments for service '{svc_name}' in namespace '{svc_namespace}': {e}"
+                ))
+            })?;
+
+        for deployment in deployments {
+            let deployment_name = deployment.metadata.name.as_ref().unwrap();
+            info!("Deleting cloudflare deployment `{deployment_name}` for service `{svc_name}` in quick mode");
+            deployment_api
+                .delete(deployment_name, &Default::default())
+                .await
+                .map_err(|e| {
+                    Error::CloudflareError(format!(
+                        "Failed to delete Deployment '{deployment_name}' for service '{svc_name}': {e}"
+                    ))
+                })?;
+        }
+
+        info!("Successfully cleaned up Cloudflare Quick tunnel mode resources for service '{svc_name}'");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cloudflare_config_tunnel_mode_detection() {
+        // Test that tunnel mode is automatically determined by presence of API credentials
+        let config_api_mode = CloudflareConfig {
+            api_token_ref: Some(crate::crds::SeretKeyRef {
+                name: "my-secret".to_string(),
+                namespace: Some("default".to_string()),
+                key: "token".to_string(),
+            }),
+            account_id: Some("test-account".to_string()),
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        let config_quick_mode = CloudflareConfig {
+            api_token_ref: None,
+            account_id: None,
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        // Check that API mode is detected when both api_token_ref and account_id are present
+        assert!(config_api_mode.api_token_ref.is_some());
+        assert!(config_api_mode.account_id.is_some());
+
+        // Check that Quick mode is detected when API credentials are absent
+        assert!(config_quick_mode.api_token_ref.is_none());
+        assert!(config_quick_mode.account_id.is_none());
+
+        // Test partial credentials (should use Quick mode)
+        let config_partial_1 = CloudflareConfig {
+            api_token_ref: Some(crate::crds::SeretKeyRef {
+                name: "my-secret".to_string(),
+                namespace: Some("default".to_string()),
+                key: "token".to_string(),
+            }),
+            account_id: None, // Missing account_id
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        let config_partial_2 = CloudflareConfig {
+            api_token_ref: None, // Missing api_token_ref
+            account_id: Some("test-account".to_string()),
+            image: None,
+            resource_prefix: None,
+            tunnel_prefix: None,
+            announce_type: None,
+        };
+
+        // Both partial configurations should use Quick mode (not use_api_mode)
+        let use_api_mode_partial_1 = config_partial_1.api_token_ref.is_some() && config_partial_1.account_id.is_some();
+        let use_api_mode_partial_2 = config_partial_2.api_token_ref.is_some() && config_partial_2.account_id.is_some();
+
+        assert!(!use_api_mode_partial_1);
+        assert!(!use_api_mode_partial_2);
     }
 }
 
