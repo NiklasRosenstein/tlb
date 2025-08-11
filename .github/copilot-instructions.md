@@ -183,6 +183,8 @@ Before committing changes:
 6. If CRDs changed, verify with `cargo run crds` and diff check
 7. Test manually with `./target/debug/controller --help` and `./target/debug/controller crds`
 
+Do make sure to format files before committing, and always run `cargo check` to ensure no compilation errors.
+
 ### Quick Validation Checklist
 
 Use this checklist to verify the instructions work correctly:
