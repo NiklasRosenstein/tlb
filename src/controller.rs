@@ -123,6 +123,20 @@ fn get_provider_type(tunnel_class_spec: &TunnelClassInnerSpec) -> Option<tlb::Pr
     }
 }
 
+/// Converts a TunnelClassInnerSpec to a TunnelProvider instance with validation
+fn get_provider_from_spec(spec: &TunnelClassInnerSpec) -> Result<Box<dyn TunnelProvider>> {
+    match (&spec.netbird, &spec.cloudflare) {
+        (Some(netbird), None) => Ok(Box::new(netbird.clone()) as Box<dyn TunnelProvider>),
+        (None, Some(cloudflare)) => Ok(Box::new(cloudflare.clone()) as Box<dyn TunnelProvider>),
+        (None, None) => Err(Error::UnexpectedError(
+            "Tunnel class must have exactly one provider configured (netbird or cloudflare)".to_string(),
+        )),
+        (Some(_), Some(_)) => Err(Error::UnexpectedError(
+            "Tunnel class must have exactly one provider configured, found multiple providers".to_string(),
+        )),
+    }
+}
+
 /// Looks up a tunnel class by name and returns its provider instance
 async fn lookup_tunnel_class_provider(
     ctx: &ReconcileContext,
@@ -132,25 +146,13 @@ async fn lookup_tunnel_class_provider(
     // First try to find a namespaced tunnel class in the service's namespace
     let tunnel_class_api = Api::<TunnelClass>::namespaced(ctx.client.clone(), service_namespace);
     if let Ok(tunnel_class) = tunnel_class_api.get(tunnel_class_name).await {
-        let spec = &tunnel_class.spec.inner;
-        if let Some(cloudflare_config) = &spec.cloudflare {
-            return Ok(Some(Box::new(cloudflare_config.clone())));
-        }
-        if let Some(netbird_config) = &spec.netbird {
-            return Ok(Some(Box::new(netbird_config.clone())));
-        }
+        return Ok(Some(get_provider_from_spec(&tunnel_class.spec.inner)?));
     }
 
     // If not found, try cluster-scoped tunnel class
     let cluster_tunnel_class_api = Api::<ClusterTunnelClass>::all(ctx.client.clone());
     if let Ok(cluster_tunnel_class) = cluster_tunnel_class_api.get(tunnel_class_name).await {
-        let spec = &cluster_tunnel_class.spec.inner;
-        if let Some(cloudflare_config) = &spec.cloudflare {
-            return Ok(Some(Box::new(cloudflare_config.clone())));
-        }
-        if let Some(netbird_config) = &spec.netbird {
-            return Ok(Some(Box::new(netbird_config.clone())));
-        }
+        return Ok(Some(get_provider_from_spec(&cluster_tunnel_class.spec.inner)?));
     }
 
     Ok(None)
@@ -534,21 +536,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .join(", ")
     );
 
-    // Validate that exactly one provider is configured
-    let active_provider: Box<dyn TunnelProvider> = match (&tunnel_class.netbird, &tunnel_class.cloudflare) {
-        (Some(netbird), None) => Box::new(netbird.clone()) as Box<dyn TunnelProvider>,
-        (None, Some(cloudflare)) => Box::new(cloudflare.clone()) as Box<dyn TunnelProvider>,
-        (None, None) => {
-            return Err(Error::UnexpectedError(
-                "Tunnel class must have exactly one provider configured (netbird or cloudflare)".to_string(),
-            ));
-        }
-        (Some(_), Some(_)) => {
-            return Err(Error::UnexpectedError(
-                "Tunnel class must have exactly one provider configured, found multiple providers".to_string(),
-            ));
-        }
-    };
+    // Validate that exactly one provider is configured and get the active provider
+    let active_provider = get_provider_from_spec(tunnel_class)?;
 
     // Process each individual service.
     for service in services {
