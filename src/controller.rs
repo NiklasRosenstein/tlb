@@ -534,31 +534,21 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .join(", ")
     );
 
-    let active_providers: Vec<Box<dyn TunnelProvider>> = vec![
-        tunnel_class
-            .netbird
-            .as_ref()
-            .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
-        tunnel_class
-            .cloudflare
-            .as_ref()
-            .map(|c| Box::new(c.clone()) as Box<dyn TunnelProvider>),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
     // Validate that exactly one provider is configured
-    if active_providers.is_empty() {
-        return Err(Error::UnexpectedError(
-            "Tunnel class must have exactly one provider configured (netbird or cloudflare)".to_string(),
-        ));
-    }
-    if active_providers.len() > 1 {
-        return Err(Error::UnexpectedError(
-            "Tunnel class must have exactly one provider configured, found multiple providers".to_string(),
-        ));
-    }
+    let active_provider: Box<dyn TunnelProvider> = match (&tunnel_class.netbird, &tunnel_class.cloudflare) {
+        (Some(netbird), None) => Box::new(netbird.clone()) as Box<dyn TunnelProvider>,
+        (None, Some(cloudflare)) => Box::new(cloudflare.clone()) as Box<dyn TunnelProvider>,
+        (None, None) => {
+            return Err(Error::UnexpectedError(
+                "Tunnel class must have exactly one provider configured (netbird or cloudflare)".to_string(),
+            ));
+        }
+        (Some(_), Some(_)) => {
+            return Err(Error::UnexpectedError(
+                "Tunnel class must have exactly one provider configured, found multiple providers".to_string(),
+            ));
+        }
+    };
 
     // Process each individual service.
     for service in services {
@@ -609,7 +599,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         // currently has the matching loadBalancerClass for this tunnel class
         let should_reconcile = current_state.as_ref() == Some(&load_balancer_class);
 
-        if !active_providers.is_empty() && should_reconcile {
+        if should_reconcile {
             // Add Service finalizer if we're managing this service
             let has_finalizer = service
                 .metadata
@@ -641,10 +631,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 info!("Added finalizer to service `{service_name}` in namespace `{service_namespace}`");
             }
 
-            // Reconcile for the current providers
-            for provider in active_providers.iter() {
-                provider.reconcile_service(ctx, &service).await?;
-            }
+            // Reconcile with the current provider
+            active_provider.reconcile_service(ctx, &service).await?;
         } else if !should_reconcile {
             // Service doesn't have matching loadBalancerClass - remove finalizer if present
             let has_finalizer = service
