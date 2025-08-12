@@ -548,6 +548,18 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     .flatten()
     .collect();
 
+    // Validate that exactly one provider is configured
+    if active_providers.is_empty() {
+        return Err(Error::UnexpectedError(
+            "Tunnel class must have exactly one provider configured (netbird or cloudflare)".to_string(),
+        ));
+    }
+    if active_providers.len() > 1 {
+        return Err(Error::UnexpectedError(
+            "Tunnel class must have exactly one provider configured, found multiple providers".to_string(),
+        ));
+    }
+
     // Process each individual service.
     for service in services {
         // Handle Service finalizer logic and check if service is being deleted
