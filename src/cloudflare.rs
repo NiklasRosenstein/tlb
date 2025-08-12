@@ -1631,6 +1631,25 @@ impl CloudflareConfig {
                 })?;
         }
 
+        // Remove the TUNNEL_URL_ANNOTATION annotation from the service.
+        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
+        let patch = json!({
+            "metadata": {
+                "annotations": {
+                    TUNNEL_URL_ANNOTATION: null // Remove the annotation
+                }
+            }
+        });
+        let ps = PatchParams::default();
+        svc_api
+            .patch(&svc_name, &ps, &Patch::Merge(&patch))
+            .await
+            .map_err(|e| {
+                Error::CloudflareError(format!(
+                    "Failed to remove tunnel URL annotation from service '{svc_name}': {e}"
+                ))
+            })?;
+
         info!("Successfully cleaned up Cloudflare Quick tunnel mode resources for service '{svc_name}'");
         Ok(())
     }
