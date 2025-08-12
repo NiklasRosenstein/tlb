@@ -496,7 +496,9 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .join(", ")
     );
 
-    // Collect all services across the namespaces that match the load balancer class.
+    // Collect all services across the namespaces that either:
+    // 1. Currently match the load balancer class, or
+    // 2. Have the last-observed-state annotation pointing to this tunnel class (for cleanup)
     let mut services: Vec<Service> = Vec::new();
     for ns in &namespaces {
         let ns_name = ns.metadata.name.as_ref().unwrap();
@@ -505,12 +507,25 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             .await?
             .into_iter()
             .filter(|svc| {
-                svc.spec.as_ref().and_then(|spec| spec.load_balancer_class.as_ref()) == Some(&load_balancer_class)
+                // Include services with current matching loadBalancerClass
+                let has_current_class =
+                    svc.spec.as_ref().and_then(|spec| spec.load_balancer_class.as_ref()) == Some(&load_balancer_class);
+
+                // Include services with last-observed-state pointing to this tunnel class
+                let has_last_observed = svc
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get(LAST_OBSERVED_STATE_ANNOTATION))
+                    .map(|state| state == &load_balancer_class)
+                    .unwrap_or(false);
+
+                has_current_class || has_last_observed
             });
         services.extend(svc_list);
     }
     info!(
-        "Found {} matching service(s) with load balancer class `{load_balancer_class}` in namespaces: {}",
+        "Found {} service(s) with load balancer class `{load_balancer_class}` or last-observed-state in namespaces: {}",
         services.len(),
         namespaces
             .iter()
@@ -657,140 +672,75 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     Ok(Action::await_change())
 }
 
-/// Cleanup services that have the last-observed-state annotation but no longer
-/// have a tunnel loadBalancerClass (e.g., switched from LoadBalancer to ClusterIP)
-async fn cleanup_abandoned_services(client: &kube::Client, events: &SimpleEventRecorder) -> Result<()> {
-    info!("Starting cleanup pass for abandoned services");
+pub async fn run(reconcile_interval: std::time::Duration) {
+    let client = kube::Client::try_default()
+        .await
+        .expect("failed to create kube::Client");
+    let events = SimpleEventRecorder::from_client(client.clone(), "tlb-controller");
 
-    // Get all namespaces
-    let namespaces = Api::<Namespace>::all(client.clone())
-        .list(&ListParams::default())
-        .await?
-        .into_iter()
-        .collect::<Vec<_>>();
+    // Periodically reconcile all tunnel classes.
+    // TODO: Instead, watch services and trigger a reconciliation when a service is created or updated?
+    let mut interval = tokio::time::interval(reconcile_interval);
+    loop {
+        info!("Starting reconciliation cycle");
 
-    for namespace in namespaces {
-        let ns_name = namespace.metadata.name.as_ref().unwrap();
-        let service_api = Api::<Service>::namespaced(client.clone(), ns_name);
+        let mut tunnel_classes = Vec::new();
 
-        // Get all services in this namespace
-        let all_services = service_api.list(&ListParams::default()).await?;
-
-        for service in all_services {
-            // Check if service has the last-observed-state annotation
-            let last_observed_state = get_last_observed_state(&service);
-            if last_observed_state.is_none() {
-                continue;
+        // Fetch all namespace-scoped tunnel classes.
+        match Api::<TunnelClass>::all(client.clone())
+            .list(&ListParams::default())
+            .await
+        {
+            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, true))),
+            Err(e) => {
+                info!("Failed to list TunnelClasses: {e}");
             }
+        };
 
-            // Check if service still has a tunnel loadBalancerClass
-            let current_state = get_current_tunnel_state(&service);
-            if current_state.is_some() {
-                continue; // Service still has a tunnel class, will be handled by regular reconciliation
+        // Fetch all cluster-scoped tunnel classes.
+        match Api::<ClusterTunnelClass>::all(client.clone())
+            .list(&ListParams::default())
+            .await
+        {
+            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, false))),
+            Err(e) => {
+                info!("Failed to list ClusterTunnelClasses: {e}");
             }
+        };
 
-            // Service has annotation but no tunnel class - needs cleanup
-            let service_name = service.metadata.name.as_ref().unwrap();
-            info!(
-                "Found abandoned service `{}` in namespace `{}` with last observed state: {:?}",
-                service_name, ns_name, last_observed_state
-            );
-
-            // Create a dummy context for cleanup operations
-            let dummy_metadata = kube::api::ObjectMeta {
-                name: Some("cleanup".to_string()),
-                namespace: Some(ns_name.clone()),
-                ..Default::default()
-            };
+        for tunnel_class in tunnel_classes {
             let ctx = ReconcileContext {
                 client: client.clone(),
                 events: events.clone(),
-                metadata: dummy_metadata,
-                namespaced: true,
+                metadata: tunnel_class.1.clone(),
+                namespaced: tunnel_class.2,
             };
-
-            // Perform cleanup using the old provider if we can find it
-            if let Some(old_state) = last_observed_state {
-                if let Some(old_tunnel_class_name) = old_state.strip_prefix("tlb.io/") {
-                    // Look up the old tunnel class to get its provider configuration
-                    if let Ok(Some(old_provider)) =
-                        lookup_tunnel_class_provider(&ctx, old_tunnel_class_name, ns_name).await
-                    {
-                        info!(
-                            "Cleaning up abandoned service `{}` with provider: {}",
-                            service_name,
-                            old_provider.provider_type()
-                        );
-                        if let Err(e) = old_provider.cleanup_service(&ctx, &service).await {
-                            log::error!(
-                                "Provider '{}' cleanup failed for abandoned service '{}': {}",
-                                old_provider.name(),
-                                service_name,
-                                e
-                            );
-                            continue; // Skip finalizer removal if cleanup failed
-                        }
-                    } else {
-                        info!(
-                            "Could not find tunnel class '{}' for abandoned service '{}' - will remove annotation and finalizer anyway",
-                            old_tunnel_class_name, service_name
-                        );
-                    }
-                }
-            }
-
-            // Remove the last-observed-state annotation
-            if let Err(e) = update_service_state_annotation(&ctx, &service, None).await {
-                log::error!(
-                    "Failed to remove last-observed-state annotation from abandoned service '{}': {}",
-                    service_name,
-                    e
-                );
-            }
-
-            // Remove the finalizer if present
-            let has_finalizer = service
-                .metadata
-                .finalizers
-                .as_ref()
-                .map(|f| f.contains(&SERVICE_FINALIZER_NAME.to_string()))
-                .unwrap_or(false);
-
-            if has_finalizer {
-                let current_finalizers = service.metadata.finalizers.as_ref().cloned().unwrap_or_default();
-                let updated_finalizers: Vec<String> = current_finalizers
-                    .into_iter()
-                    .filter(|f| f != SERVICE_FINALIZER_NAME)
-                    .collect();
-
-                if let Err(e) = service_api
-                    .patch(
-                        service_name,
-                        &PatchParams::default(),
-                        &Patch::Merge(json!({
-                            "metadata": {
-                                "finalizers": updated_finalizers
-                            }
-                        })),
-                    )
-                    .await
-                {
-                    log::error!(
-                        "Failed to remove finalizer from abandoned service '{}': {}",
-                        service_name,
-                        e
-                    );
+            reconcile(&tunnel_class.0, &ctx).await.unwrap_or_else(|e| {
+                let tunnel_class_name = tunnel_class.1.name.as_deref().unwrap_or("<unknown>");
+                let namespace = if tunnel_class.2 {
+                    tunnel_class
+                        .1
+                        .namespace
+                        .as_ref()
+                        .map(|ns| format!(" in namespace '{ns}'"))
+                        .unwrap_or_default()
                 } else {
-                    info!(
-                        "Removed finalizer from abandoned service `{}` in namespace `{}`",
-                        service_name, ns_name
-                    );
-                }
-            }
+                    " (cluster-scoped)".to_string()
+                };
+                log::error!(
+                    "Failed to reconcile TunnelClass '{}'{}: {} (in controller::reconcile at {}:{})",
+                    tunnel_class_name,
+                    namespace,
+                    e,
+                    file!(),
+                    line!()
+                );
+                Action::requeue(reconcile_interval)
+            });
         }
-    }
 
-    Ok(())
+        interval.tick().await;
+    }
 }
 
 #[cfg(test)]
@@ -890,87 +840,5 @@ mod tests {
         // This represents an active service: has both annotation and current tunnel class
         assert_eq!(current_state, Some("tlb.io/cloudflare".to_string()));
         assert_eq!(last_observed_state, Some("tlb.io/cloudflare".to_string()));
-    }
-}
-
-pub async fn run(reconcile_interval: std::time::Duration) {
-    let client = kube::Client::try_default()
-        .await
-        .expect("failed to create kube::Client");
-    let events = SimpleEventRecorder::from_client(client.clone(), "tlb-controller");
-
-    // Periodically reconcile all tunnel classes.
-    // TODO: Instead, watch services and trigger a reconciliation when a service is created or updated?
-    let mut interval = tokio::time::interval(reconcile_interval);
-    loop {
-        info!("Starting reconciliation cycle");
-
-        let mut tunnel_classes = Vec::new();
-
-        // Fetch all namespace-scoped tunnel classes.
-        match Api::<TunnelClass>::all(client.clone())
-            .list(&ListParams::default())
-            .await
-        {
-            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, true))),
-            Err(e) => {
-                info!("Failed to list TunnelClasses: {e}");
-            }
-        };
-
-        // Fetch all cluster-scoped tunnel classes.
-        match Api::<ClusterTunnelClass>::all(client.clone())
-            .list(&ListParams::default())
-            .await
-        {
-            Ok(resources) => tunnel_classes.extend(resources.into_iter().map(|t| (t.spec.inner, t.metadata, false))),
-            Err(e) => {
-                info!("Failed to list ClusterTunnelClasses: {e}");
-            }
-        };
-
-        for tunnel_class in tunnel_classes {
-            let ctx = ReconcileContext {
-                client: client.clone(),
-                events: events.clone(),
-                metadata: tunnel_class.1.clone(),
-                namespaced: tunnel_class.2,
-            };
-            reconcile(&tunnel_class.0, &ctx).await.unwrap_or_else(|e| {
-                let tunnel_class_name = tunnel_class.1.name.as_deref().unwrap_or("<unknown>");
-                let namespace = if tunnel_class.2 {
-                    tunnel_class
-                        .1
-                        .namespace
-                        .as_ref()
-                        .map(|ns| format!(" in namespace '{ns}'"))
-                        .unwrap_or_default()
-                } else {
-                    " (cluster-scoped)".to_string()
-                };
-                log::error!(
-                    "Failed to reconcile TunnelClass '{}'{}: {} (in controller::reconcile at {}:{})",
-                    tunnel_class_name,
-                    namespace,
-                    e,
-                    file!(),
-                    line!()
-                );
-                Action::requeue(reconcile_interval)
-            });
-        }
-
-        // Cleanup pass: Find services that have the last-observed-state annotation but no longer
-        // have a tunnel loadBalancerClass and clean them up
-        if let Err(e) = cleanup_abandoned_services(&client, &events).await {
-            log::error!(
-                "Failed to cleanup abandoned services: {} (in controller::run at {}:{})",
-                e,
-                file!(),
-                line!()
-            );
-        }
-
-        interval.tick().await;
     }
 }
