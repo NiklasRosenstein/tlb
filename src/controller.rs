@@ -539,7 +539,6 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
     // Validate that exactly one provider is configured and get the active provider
     let active_provider = get_provider_from_spec(tunnel_class)?;
 
-    // Process each individual service.
     for service in services {
         // Handle Service finalizer logic and check if service is being deleted
         let service_being_deleted = handle_service_finalizer(ctx, &service).await?;
@@ -553,19 +552,10 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         let current_state = get_current_tunnel_state(&service);
         let last_observed_state = get_last_observed_state(&service);
 
-        // Handle state transitions
-        if last_observed_state.as_deref() != current_state.as_deref() {
-            info!(
-                "State transition detected for service `{}`: {:?} -> {:?}",
-                service.metadata.name.as_ref().unwrap(),
-                last_observed_state,
-                current_state
-            );
-
-            // Handle loadBalancerClass transitions - cleanup with old provider if we can find it
-            if let Some(old_state) = &last_observed_state {
+        // If last observed state != current tunnel class, cleanup with previous provider
+        if let Some(old_state) = &last_observed_state {
+            if old_state != &load_balancer_class {
                 if let Some(old_tunnel_class_name) = old_state.strip_prefix("tlb.io/") {
-                    // Look up the old tunnel class to get its provider configuration
                     let service_namespace = service.metadata.namespace.as_ref().unwrap();
                     if let Some(old_provider) =
                         lookup_tunnel_class_provider(ctx, old_tunnel_class_name, service_namespace).await?
@@ -578,17 +568,13 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                         old_provider.cleanup_service(ctx, &service).await?;
                     }
                 }
+                // Update state annotation after successful cleanup
+                update_service_state_annotation(ctx, &service, current_state.as_deref()).await?;
             }
-
-            // Update state annotation
-            update_service_state_annotation(ctx, &service, current_state.as_deref()).await?;
         }
 
-        // Reconcile with current providers (if any) - but only if this service
-        // currently has the matching loadBalancerClass for this tunnel class
-        let should_reconcile = current_state.as_ref() == Some(&load_balancer_class);
-
-        if should_reconcile {
+        // If load balancer class == current tunnel class, reconcile with current provider
+        if current_state.as_ref() == Some(&load_balancer_class) {
             // Add Service finalizer if we're managing this service
             let has_finalizer = service
                 .metadata
@@ -620,9 +606,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                 info!("Added finalizer to service `{service_name}` in namespace `{service_namespace}`");
             }
 
-            // Reconcile with the current provider
             active_provider.reconcile_service(ctx, &service).await?;
-        } else if !should_reconcile {
+        } else {
             // Service doesn't have matching loadBalancerClass - remove finalizer if present
             let has_finalizer = service
                 .metadata
