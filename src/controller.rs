@@ -593,8 +593,11 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             update_service_state_annotation(ctx, &service, current_state.as_deref()).await?;
         }
 
-        // Reconcile with current providers (if any)
-        if !active_providers.is_empty() {
+        // Reconcile with current providers (if any) - but only if this service
+        // currently has the matching loadBalancerClass for this tunnel class
+        let should_reconcile = current_state.as_ref() == Some(&load_balancer_class);
+
+        if !active_providers.is_empty() && should_reconcile {
             // Add Service finalizer if we're managing this service
             let has_finalizer = service
                 .metadata
@@ -630,8 +633,8 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
             for provider in active_providers.iter() {
                 provider.reconcile_service(ctx, &service).await?;
             }
-        } else {
-            // No tunnel provider - remove finalizer if present
+        } else if !should_reconcile {
+            // Service doesn't have matching loadBalancerClass - remove finalizer if present
             let has_finalizer = service
                 .metadata
                 .finalizers
@@ -663,7 +666,7 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
                     .await?;
 
                 info!(
-                    "Removed finalizer from service `{service_name}` in namespace `{service_namespace}` (no tunnel provider)"
+                    "Removed finalizer from service `{service_name}` in namespace `{service_namespace}` (no longer using tunnel class)"
                 );
             }
         }
