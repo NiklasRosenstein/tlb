@@ -552,9 +552,9 @@ async fn reconcile(tunnel_class: &TunnelClassInnerSpec, ctx: &ReconcileContext) 
         let current_state = get_current_tunnel_state(&service);
         let last_observed_state = get_last_observed_state(&service);
 
-        // If last observed state != current tunnel class, cleanup with previous provider
+        // If last observed state != current state, cleanup with previous provider
         if let Some(old_state) = &last_observed_state {
-            if old_state != &load_balancer_class {
+            if last_observed_state != current_state {
                 if let Some(old_tunnel_class_name) = old_state.strip_prefix("tlb.io/") {
                     let service_namespace = service.metadata.namespace.as_ref().unwrap();
                     if let Some(old_provider) =
