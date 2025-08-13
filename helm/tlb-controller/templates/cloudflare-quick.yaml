@@ -1,8 +1,8 @@
-{- if .Values.enableCloudflareQuick -}
+{{- if .Values.enableCloudflareQuick -}}
 apiVersion: tlb.io/v1alpha1
 kind: ClusterTunnelClass
 metadata:
   name: cloudflare-quick
 spec:
   cloudflare: {}
-{- end -}
+{{- end -}}
