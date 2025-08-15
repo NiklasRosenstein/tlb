@@ -21,41 +21,50 @@ stringData:
   token: Sq2z0C-4vIEG70H_MMgOtoBG5MkhxZRxYpL4fv9r
 
 ---
-# Simple HTTP service using the NetBird format
+# Service with named ports using NetBird format
 apiVersion: v1
 kind: Service
 metadata:
-  name: nginx-hello-world
+  name: named-ports-service
   annotations:
-    tlb.io/dns: hello.432372253.xyz
-    tlb.io/map-ports: "80:80"
+    tlb.io/dns: named.432372253.xyz
+    tlb.io/map-ports: "443/tls:https, 22:ssh"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/cloudflare
   selector:
-    app: nginx-hello-world
+    app: named-ports-app
   ports:
     - protocol: TCP
-      port: 80
-      targetPort: 80
+      port: 8443
+      targetPort: 8443
+      name: https
+    - protocol: TCP
+      port: 2222
+      targetPort: 22
+      name: ssh
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: nginx-hello-world
+  name: named-ports-app
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: nginx-hello-world
+      app: named-ports-app
   template:
     metadata:
       labels:
-        app: nginx-hello-world
+        app: named-ports-app
     spec:
       containers:
-        - name: nginx-hello-world
+        - name: https-server
           image: nginx:latest
           ports:
-            - containerPort: 80
+            - containerPort: 8443
+        - name: ssh-server
+          image: lscr.io/linuxserver/openssh-server:latest
+          ports:
+            - containerPort: 22

@@ -95,8 +95,8 @@ pub trait Reconcile<C> {
 /// Represents a single port mapping configuration
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortMapping {
-    /// Port that socat should listen on
-    pub listen_port: u16,
+    /// Port that socat should listen on (can be numeric like "443" or named like "https")
+    pub listen_port: String,
     /// Whether to use TLS termination on the listen side (OPENSSL-LISTEN vs TCP-LISTEN)
     pub listen_tls: bool,
     /// Service port (either port number or port name) to forward traffic to
@@ -130,15 +130,13 @@ impl PortMapping {
         })
     }
 
-    fn parse_listen_part(s: &str) -> Result<(u16, bool), String> {
+    fn parse_listen_part(s: &str) -> Result<(String, bool), String> {
         if let Some(port_str) = s.strip_suffix("/tls") {
-            let port = port_str
-                .parse::<u16>()
-                .map_err(|_| format!("Invalid listen port: '{port_str}'"))?;
-            Ok((port, true))
+            // Can be either numeric (e.g., "443") or named (e.g., "https")
+            Ok((port_str.to_string(), true))
         } else {
-            let port = s.parse::<u16>().map_err(|_| format!("Invalid listen port: '{s}'"))?;
-            Ok((port, false))
+            // Can be either numeric (e.g., "80") or named (e.g., "http")
+            Ok((s.to_string(), false))
         }
     }
 
