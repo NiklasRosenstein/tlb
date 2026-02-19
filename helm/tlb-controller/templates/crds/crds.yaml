@@ -6,15 +6,12 @@ metadata:
 spec:
   group: tlb.io
   names:
-    categories: []
     kind: TunnelClass
     plural: tunnelclasses
-    shortNames: []
     singular: tunnelclass
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Auto-generated derived type for TunnelClassSpec via `CustomResource`
@@ -151,15 +148,12 @@ metadata:
 spec:
   group: tlb.io
   names:
-    categories: []
     kind: ClusterTunnelClass
     plural: clustertunnelclasses
-    shortNames: []
     singular: clustertunnelclass
   scope: Cluster
   versions:
-  - additionalPrinterColumns: []
-    name: v1alpha1
+  - name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Auto-generated derived type for ClusterTunnelClassSpec via `CustomResource`

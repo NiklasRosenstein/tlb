@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 use kube::CustomResourceExt;
+use serde::Serialize;
+use serde_yaml::Value;
 
 mod controller;
 mod crds;
@@ -31,12 +33,36 @@ async fn main() {
         Some(Command::Crds {}) => {
             print!(
                 "---\n{}",
-                serde_yaml::to_string(&crate::crds::TunnelClass::crd()).unwrap()
+                serialize_crd_without_empty_arrays(crate::crds::TunnelClass::crd())
             );
             print!(
                 "---\n{}",
-                serde_yaml::to_string(&crate::crds::ClusterTunnelClass::crd()).unwrap()
+                serialize_crd_without_empty_arrays(crate::crds::ClusterTunnelClass::crd())
             )
         }
+    }
+}
+
+fn serialize_crd_without_empty_arrays<T: Serialize>(crd: T) -> String {
+    let mut value = serde_yaml::to_value(crd).unwrap();
+    remove_empty_array_fields(&mut value);
+    serde_yaml::to_string(&value).unwrap()
+}
+
+fn remove_empty_array_fields(value: &mut Value) {
+    match value {
+        Value::Mapping(mapping) => {
+            for child in mapping.values_mut() {
+                remove_empty_array_fields(child);
+            }
+
+            mapping.retain(|_, child| !matches!(child, Value::Sequence(seq) if seq.is_empty()));
+        }
+        Value::Sequence(sequence) => {
+            for child in sequence {
+                remove_empty_array_fields(child);
+            }
+        }
+        _ => {}
     }
 }
