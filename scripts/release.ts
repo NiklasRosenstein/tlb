@@ -58,4 +58,11 @@ await new Deno.Command("cargo", { args: ["update"] }).spawn().output();
 await new Deno.Command("git", { args: ["add", ...BUMPS.map((b) => b.file), "Cargo.lock"] }).spawn().output();
 await new Deno.Command("git", { args: ["commit", "-m", `Release ${version}`] }).spawn().output();
 await new Deno.Command("git", { args: ["tag", `v${version}`] }).spawn().output();
-console.log(`Version bumped to ${version} and changes committed.`);
+const branchOutput = await new Deno.Command("git", {
+  args: ["rev-parse", "--abbrev-ref", "HEAD"],
+}).output();
+const branch = new TextDecoder().decode(branchOutput.stdout).trim();
+
+await new Deno.Command("git", { args: ["push", "origin", branch] }).spawn().output();
+await new Deno.Command("git", { args: ["push", "origin", `v${version}`] }).spawn().output();
+console.log(`Version bumped to ${version}, changes committed, branch pushed, and tag published.`);
