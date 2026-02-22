@@ -217,7 +217,7 @@ impl TunnelProvider for NetbirdConfig {
                 kind: "Service".into(),
                 name: service.name_any(),
                 uid: service.metadata.uid.clone().unwrap_or_default(),
-                controller: Some(false),
+                controller: Some(true),
                 block_owner_deletion: Some(true),
             }]
         } else {
