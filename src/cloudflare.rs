@@ -104,11 +104,59 @@ struct CreateTunnelPayload<'a> {
 
 /// Extracts the Cloudflare tunnel URL from pod logs
 /// Looks for the pattern: "https://....trycloudflare.com" in the logs
+/// Returns (tunnel_url, pod_uid) if found
+/// If current_pod is provided, uses that pod; otherwise finds a running pod
 async fn extract_tunnel_url_from_logs(
     client: kube::Client,
     namespace: &str,
     deployment_name: &str,
-) -> Result<Option<String>> {
+    current_pod: Option<Pod>,
+) -> Result<Option<(String, String)>> {
+    let pod = match current_pod {
+        Some(pod) => pod,
+        None => match get_current_log_pod(client.clone(), namespace, deployment_name).await? {
+            Some(pod) => pod,
+            None => return Ok(None),
+        },
+    };
+
+    if let Some(pod_name) = &pod.metadata.name {
+        // Get the pod UID for tracking
+        let pod_uid = pod
+            .metadata
+            .uid
+            .as_ref()
+            .ok_or_else(|| Error::UnexpectedError("Pod missing UID".to_string()))?;
+
+        // Get logs from the cloudflared container
+        let pod_api: Api<Pod> = Api::namespaced(client, namespace);
+        let log_params = LogParams {
+            container: Some("cloudflared".to_string()),
+            tail_lines: Some(100), // Look at recent logs
+            ..Default::default()
+        };
+
+        match pod_api.logs(pod_name, &log_params).await {
+            Ok(logs) => {
+                // Look for the tunnel URL pattern in logs
+                for line in logs.lines() {
+                    if let Some(url) = extract_url_from_log_line(line) {
+                        info!("Found tunnel URL in logs: {url}");
+                        return Ok(Some((url, pod_uid.clone())));
+                    }
+                }
+            }
+            Err(e) => {
+                info!("Could not get logs from pod {pod_name}: {e}");
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Gets the current running pod that would be used for log reading
+async fn get_current_log_pod(client: kube::Client, namespace: &str, deployment_name: &str) -> Result<Option<Pod>> {
     let pod_api: Api<Pod> = Api::namespaced(client, namespace);
 
     // Find pods for this deployment
@@ -118,36 +166,13 @@ async fn extract_tunnel_url_from_logs(
         .await?;
 
     for pod in pods.items {
-        if let Some(pod_name) = &pod.metadata.name {
+        if pod.metadata.name.is_some() {
             // Check if pod is running
             if let Some(status) = &pod.status {
                 if let Some(phase) = &status.phase {
-                    if phase != "Running" {
-                        continue;
+                    if phase == "Running" {
+                        return Ok(Some(pod));
                     }
-                }
-            }
-
-            // Get logs from the cloudflared container
-            let log_params = LogParams {
-                container: Some("cloudflared".to_string()),
-                tail_lines: Some(100), // Look at recent logs
-                ..Default::default()
-            };
-
-            match pod_api.logs(pod_name, &log_params).await {
-                Ok(logs) => {
-                    // Look for the tunnel URL pattern in logs
-                    for line in logs.lines() {
-                        if let Some(url) = extract_url_from_log_line(line) {
-                            info!("Found tunnel URL in logs: {url}");
-                            return Ok(Some(url));
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Continue to next pod if logs aren't available yet
-                    info!("Could not get logs from pod {pod_name}: {e}");
                 }
             }
         }
@@ -1224,25 +1249,56 @@ impl CloudflareConfig {
 
         // Check if we already have the tunnel URL cached in service annotations
         let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let mut tunnel_url = service
+        let cached_annotation = service
             .metadata
             .annotations
             .as_ref()
             .and_then(|annotations| annotations.get(TUNNEL_URL_ANNOTATION))
             .cloned();
 
-        // If not cached, try to extract it from pod logs
+        let mut tunnel_url: Option<String> = None;
+
+        // Get the current pod that we would read logs from
+        let current_pod = get_current_log_pod(ctx.client.clone(), &svc_namespace, &deployment_name).await?;
+
+        // Parse cached annotation to extract pod UID and URL
+        if let Some(cached_value) = &cached_annotation {
+            if let Some((cached_pod_uid, cached_url)) = cached_value.split_once(':') {
+                // Check if the current pod is the same as the cached pod
+                if let Some(ref pod) = current_pod {
+                    if let Some(current_pod_uid) = &pod.metadata.uid {
+                        if current_pod_uid == cached_pod_uid {
+                            tunnel_url = Some(cached_url.to_string());
+                            info!("Using cached tunnel URL for pod UID {cached_pod_uid}: {cached_url}");
+                        } else {
+                            info!(
+                                "Current pod UID {current_pod_uid} differs from cached pod UID {cached_pod_uid}, will re-read tunnel URL"
+                            );
+                        }
+                    } else {
+                        info!("Current pod missing UID, will re-read tunnel URL");
+                    }
+                } else {
+                    info!("No current running pod found, will re-read tunnel URL");
+                }
+            } else {
+                info!("Cached annotation format is invalid, will re-read tunnel URL");
+            }
+        }
+
+        // If not cached or pod changed, try to extract it from pod logs
         if tunnel_url.is_none() {
-            if let Ok(Some(url)) =
-                extract_tunnel_url_from_logs(ctx.client.clone(), &svc_namespace, &deployment_name).await
+            if let Ok(Some((url, pod_uid))) =
+                extract_tunnel_url_from_logs(ctx.client.clone(), &svc_namespace, &deployment_name, current_pod).await
             {
                 tunnel_url = Some(url.clone());
 
-                // Cache the tunnel URL in service annotations
+                // Cache the tunnel URL with pod UID in service annotations
+                let cached_value = format!("{pod_uid}:{url}");
                 let patch = json!({
                     "metadata": {
                         "annotations": {
-                            TUNNEL_URL_ANNOTATION: url
+                            TUNNEL_URL_ANNOTATION: cached_value
                         }
                     }
                 });
@@ -1252,6 +1308,8 @@ impl CloudflareConfig {
                     .await
                 {
                     error!("Failed to cache tunnel URL in service annotations: {e}");
+                } else {
+                    info!("Cached tunnel URL for pod UID {pod_uid}: {url}");
                 }
             }
         }
@@ -1721,5 +1779,32 @@ mod tests {
 
         assert!(!use_api_mode_partial_1);
         assert!(!use_api_mode_partial_2);
+    }
+
+    #[test]
+    fn test_tunnel_url_annotation_format() {
+        // Test parsing of the new pod UID:URL format
+        let annotation_value = "pod-uid-123:https://test.trycloudflare.com";
+
+        // Split the annotation to extract pod UID and URL
+        if let Some((pod_uid, url)) = annotation_value.split_once(':') {
+            assert_eq!(pod_uid, "pod-uid-123");
+            assert_eq!(url, "https://test.trycloudflare.com");
+        } else {
+            panic!("Failed to parse annotation format");
+        }
+
+        // Test invalid format (no colon)
+        let invalid_annotation = "just-a-url-without-pod-uid";
+        assert!(invalid_annotation.split_once(':').is_none());
+
+        // Test multiple colons (should split on first colon only)
+        let multi_colon_annotation = "pod-uid-456:https://test:8080.trycloudflare.com";
+        if let Some((pod_uid, url)) = multi_colon_annotation.split_once(':') {
+            assert_eq!(pod_uid, "pod-uid-456");
+            assert_eq!(url, "https://test:8080.trycloudflare.com");
+        } else {
+            panic!("Failed to parse multi-colon annotation format");
+        }
     }
 }
