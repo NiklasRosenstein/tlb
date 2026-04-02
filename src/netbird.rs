@@ -40,6 +40,15 @@ const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
 pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=warn";
 
+/// Validates that a listen port is numeric (NetBird requirement)
+fn validate_numeric_listen_port(mapping: &crate::PortMapping) -> Result<u16> {
+    mapping.listen_port.parse::<u16>()
+        .map_err(|_| Error::ConfigError(format!(
+            "NetBird provider requires numeric listen ports, but got named port '{}'. Use numeric ports like '80' or '443' instead of named ports like 'http' or 'https'",
+            mapping.listen_port
+        )))
+}
+
 /// Resolves a port mapping to actual port number and protocol
 fn resolve_port_mapping(mapping: &crate::PortMapping, ports: &[ServicePort]) -> Result<(i32, String)> {
     if let Ok(port_num) = mapping.service_port.parse::<i32>() {
@@ -99,16 +108,18 @@ fn get_netbird_launch_script(
     if let Some(mappings) = port_mappings {
         // Use custom port mappings
         for mapping in mappings {
+            // Validate that listen port is numeric (NetBird requirement)
+            let listen_port_num = validate_numeric_listen_port(&mapping)?;
+
             // Resolve service port to actual port number and protocol
             let (target_port, protocol) = resolve_port_mapping(&mapping, ports)?;
 
             let listen_spec = if mapping.listen_tls {
                 format!(
-                    "openssl-listen:{},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0",
-                    mapping.listen_port
+                    "openssl-listen:{listen_port_num},fork,reuseaddr,cert=/tls/tls.crt,key=/tls/tls.key,verify=0"
                 )
             } else {
-                format!("{protocol}-listen:{},fork,reuseaddr", mapping.listen_port)
+                format!("{protocol}-listen:{listen_port_num},fork,reuseaddr")
             };
 
             let target_spec = if mapping.service_tls {
@@ -891,21 +902,21 @@ mod tests {
     fn test_port_mapping_parsing() {
         // Test valid mappings
         let mapping = crate::PortMapping::parse("443/tls:8080").unwrap();
-        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_port, "443");
         assert!(mapping.listen_tls);
         assert_eq!(mapping.service_port, "8080");
         assert!(!mapping.service_tls);
         assert!(mapping.service_tls_verify);
 
         let mapping = crate::PortMapping::parse("80:http").unwrap();
-        assert_eq!(mapping.listen_port, 80);
+        assert_eq!(mapping.listen_port, "80");
         assert!(!mapping.listen_tls);
         assert_eq!(mapping.service_port, "http");
         assert!(!mapping.service_tls);
         assert!(mapping.service_tls_verify);
 
         let mapping = crate::PortMapping::parse("443/tls:5001/tls-no-verify").unwrap();
-        assert_eq!(mapping.listen_port, 443);
+        assert_eq!(mapping.listen_port, "443");
         assert!(mapping.listen_tls);
         assert_eq!(mapping.service_port, "5001");
         assert!(mapping.service_tls);
@@ -914,8 +925,8 @@ mod tests {
         // Test multiple mappings
         let mappings = crate::PortMapping::parse_multiple("80:http, 443/tls:https").unwrap();
         assert_eq!(mappings.len(), 2);
-        assert_eq!(mappings[0].listen_port, 80);
-        assert_eq!(mappings[1].listen_port, 443);
+        assert_eq!(mappings[0].listen_port, "80");
+        assert_eq!(mappings[1].listen_port, "443");
         assert!(mappings[1].listen_tls);
     }
 
@@ -929,7 +940,7 @@ mod tests {
         }];
 
         let port_mappings = Some(vec![crate::PortMapping {
-            listen_port: 443,
+            listen_port: "443".to_string(),
             listen_tls: true,
             service_port: "443".to_string(),
             service_tls: false,
@@ -965,7 +976,7 @@ mod tests {
         }];
 
         let port_mappings = Some(vec![crate::PortMapping {
-            listen_port: 443,
+            listen_port: "443".to_string(),
             listen_tls: true,
             service_port: "http".to_string(),
             service_tls: false,
@@ -999,7 +1010,7 @@ mod tests {
         }];
 
         let port_mappings = Some(vec![crate::PortMapping {
-            listen_port: 443,
+            listen_port: "443".to_string(),
             listen_tls: true,
             service_port: "5001".to_string(),
             service_tls: true,
@@ -1060,7 +1071,7 @@ mod tests {
         }];
 
         let port_mappings = Some(vec![crate::PortMapping {
-            listen_port: 443,
+            listen_port: "443".to_string(),
             listen_tls: true,
             service_port: "invalid-port".to_string(), // This port doesn't exist
             service_tls: false,
@@ -1082,5 +1093,41 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.unwrap_err().to_string();
         assert!(error_message.contains("Port mapping references unknown service port 'invalid-port'"));
+    }
+
+    #[test]
+    fn test_named_listen_ports_rejected() {
+        let ports = vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            protocol: Some("TCP".to_string()),
+            ..Default::default()
+        }];
+
+        // Test that named listen ports are rejected by NetBird
+        let port_mappings = Some(vec![crate::PortMapping {
+            listen_port: "http".to_string(), // Named port should be rejected
+            listen_tls: false,
+            service_port: "http".to_string(),
+            service_tls: false,
+            service_tls_verify: true,
+        }]);
+
+        let result = get_netbird_launch_script(
+            "10.0.0.1".to_string(),
+            "test-service".to_string(),
+            "test-namespace".to_string(),
+            "eth0".to_string(),
+            "wt0".to_string(),
+            "/usr/local/bin/netbird up -F -l=warn".to_string(),
+            &ports,
+            port_mappings,
+        );
+
+        // Should return an error for named listen port
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("NetBird provider requires numeric listen ports"));
+        assert!(error_message.contains("but got named port 'http'"));
     }
 }
