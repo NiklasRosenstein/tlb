@@ -44,6 +44,9 @@ pub struct CloudflareConfig {
     pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
     pub image: Option<String>,
+    /// Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+    #[serde(default)]
+    pub transport_protocol: CloudflareTransportProtocol,
     /// Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
     pub resource_prefix: Option<String>,
     /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
@@ -51,6 +54,25 @@ pub struct CloudflareConfig {
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudflareTransportProtocol {
+    #[default]
+    Auto,
+    Quic,
+    Http2,
+}
+
+impl AsRef<str> for CloudflareTransportProtocol {
+    fn as_ref(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Quic => "quic",
+            Self::Http2 => "http2",
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -135,4 +157,27 @@ pub struct SeretKeyRef {
     pub name: String,
     pub namespace: Option<String>,
     pub key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloudflare_transport_defaults_and_validates() {
+        let default: CloudflareConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.transport_protocol.as_ref(), "auto");
+        for protocol in ["auto", "quic", "http2"] {
+            let config: CloudflareConfig =
+                serde_json::from_value(serde_json::json!({ "transportProtocol": protocol })).unwrap();
+            assert_eq!(config.transport_protocol.as_ref(), protocol);
+            assert_eq!(serde_json::to_value(config).unwrap()["transportProtocol"], protocol);
+        }
+        assert!(
+            serde_json::from_value::<CloudflareConfig>(serde_json::json!({
+                "transportProtocol": "https"
+            }))
+            .is_err()
+        );
+    }
 }

@@ -98,3 +98,9 @@ wait_for = ["build", "test"]
 
 [tasks.ci]
 depends = ["check", "fmt-check", "lint", "test", "build", "check-crds-uptodate"]
+
+[tasks.e2e-quick-tunnel]
+tools.kind = "0.33.0"
+tools.helm = "4.2.4"
+description = "Verify public Quick Tunnel traffic through the built image and Helm chart in kind"
+run = "cargo run --locked --example quick-tunnel-e2e --"

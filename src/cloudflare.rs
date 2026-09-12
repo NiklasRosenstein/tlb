@@ -573,6 +573,8 @@ impl TunnelProvider for CloudflareConfig {
         let mut args = vec![
             "tunnel".into(),
             "--no-autoupdate".into(),
+            "--protocol".into(),
+            self.transport_protocol.as_ref().into(),
             "--metrics".into(),
             "0.0.0.0:2000".into(),
         ];

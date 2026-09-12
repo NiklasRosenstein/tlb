@@ -101,3 +101,10 @@ Removing a name from `tlb.io/dns` removes the corresponding managed record; dele
 its managed DNS records.
 
 The [class reference](../../reference/classes/#cloudflare-fields) lists images, naming, and announcement settings.
+
+## Tunnel transport
+
+`transportProtocol` selects the connection from cloudflared to Cloudflare: `auto` (default), `quic`, or `http2`. Set
+`spec.cloudflare.transportProtocol: http2` when outbound UDP is blocked or automatic fallback does not establish a
+connection. The tunnel needs outbound connectivity to Cloudflare on port 7844. This setting is independent of the origin
+protocol selected by `tlb.io/protocol`.

@@ -59,6 +59,14 @@ spec:
                     description: Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
                     nullable: true
                     type: string
+                  transportProtocol:
+                    default: auto
+                    description: Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+                    enum:
+                    - auto
+                    - quic
+                    - http2
+                    type: string
                   tunnelPrefix:
                     description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
                     nullable: true
@@ -221,6 +229,14 @@ spec:
                   resourcePrefix:
                     description: Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
                     nullable: true
+                    type: string
+                  transportProtocol:
+                    default: auto
+                    description: Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+                    enum:
+                    - auto
+                    - quic
+                    - http2
                     type: string
                   tunnelPrefix:
                     description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
