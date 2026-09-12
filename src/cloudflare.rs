@@ -1,358 +1,794 @@
-use std::collections::BTreeMap;
-
+use crate::{
+    Error, ReconcileContext, Result, TunnelProvider,
+    crds::{CloudflareAnnounceType, CloudflareConfig},
+    state::{Binding, DnsIntent},
+};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use k8s_openapi::{
     ByteString,
     api::{
-        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
+        apps::v1::{Deployment, DeploymentSpec},
         core::v1::{
-            ConfigMap, Container, LoadBalancerIngress, Pod, PodSpec, PodTemplateSpec, Secret, Service, ServicePort,
-            ServiceStatus, Volume, VolumeMount,
+            Affinity, ConfigMap, Container, HTTPGetAction, LoadBalancerIngress, Pod, PodSpec, PodTemplateSpec, Probe,
+            Secret, Service, ServicePort, Volume, VolumeMount,
         },
     },
-    apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference},
+    apimachinery::pkg::{
+        apis::meta::v1::{LabelSelector, ObjectMeta},
+        util::intstr::IntOrString,
+    },
 };
 use kube::{
-    Resource,
-    api::{Api, LogParams, Patch, PatchParams, PostParams, ResourceExt},
+    Api, ResourceExt,
+    api::{ListParams, LogParams},
 };
-use log::{error, info};
-use rand::RngCore;
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
-
-use crate::{
-    Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
-    crds::{CloudflareAnnounceType, CloudflareConfig},
+use rand::Rng;
+use reqwest::{
+    Method,
+    header::{AUTHORIZATION, HeaderMap, HeaderValue},
+};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
 };
 
-use crate::{FOR_SERVICE_LABEL, FOR_TUNNEL_CLASS_LABEL, PROVIDER_LABEL};
-
-const FINALIZER_NAME: &str = "tlb.io/cloudflare-tunnel";
-const DEFAULT_CLOUDFLARED_IMAGE: &str = "cloudflare/cloudflared:latest";
 const CLOUDFLARE_API_URL: &str = "https://api.cloudflare.com/client/v4";
-const DEFAULT_RESOURCE_PREFIX: &str = "cf-";
-const DEFAULT_TUNNEL_PREFIX: &str = "kube-";
-const TUNNEL_URL_ANNOTATION: &str = "controller.tlb.io/cloudflare-quick-tunnel-url";
+const DEFAULT_IMAGE: &str = "cloudflare/cloudflared:latest";
 
-#[derive(Deserialize, Debug)]
-struct CloudflareApiMsg {
-    #[allow(dead_code)]
-    code: u16,
-    #[allow(dead_code)]
-    message: String,
-    #[allow(dead_code)]
-    documentation_url: Option<String>,
-    // source
-}
-
-#[derive(Deserialize, Debug)]
-struct CloudflareApiResponse<T> {
-    #[allow(dead_code)]
-    errors: Vec<CloudflareApiMsg>,
-    #[allow(dead_code)]
-    messages: Vec<CloudflareApiMsg>,
-    result: Option<T>,
+#[derive(Deserialize)]
+struct ApiResponse<T> {
     success: bool,
+    result: Option<T>,
+    #[serde(default)]
+    errors: Vec<ApiError>,
+    result_info: Option<PageInfo>,
 }
-
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
+struct ApiError {
+    code: u32,
+    message: String,
+}
+#[derive(Deserialize)]
+struct PageInfo {
+    total_pages: Option<u32>,
+}
+#[derive(Deserialize)]
 struct Tunnel {
     id: String,
+    name: String,
+    config_src: Option<String>,
+    deleted_at: Option<String>,
 }
-
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Zone {
     id: String,
     name: String,
 }
-
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct DnsRecord {
-    #[allow(dead_code)]
     id: String,
-    #[allow(dead_code)]
     name: String,
     content: String,
     #[serde(rename = "type")]
-    record_type: String,
-}
-
-#[derive(Serialize)]
-struct CreateDnsRecordPayload<'a> {
-    #[serde(rename = "type")]
-    record_type: &'a str,
-    name: &'a str,
-    content: &'a str,
-    ttl: u32,
+    kind: String,
+    comment: Option<String>,
     proxied: bool,
+    ttl: u32,
 }
 
 struct CloudflareApi {
     client: reqwest::Client,
-    account_id: String,
-}
-
-#[derive(Serialize)]
-struct CreateTunnelPayload<'a> {
-    name: &'a str,
-    config_src: &'a str,
-    tunnel_secret: &'a str,
-}
-
-/// Extracts the Cloudflare tunnel URL from pod logs
-/// Looks for the pattern: "https://....trycloudflare.com" in the logs
-async fn extract_tunnel_url_from_logs(
-    client: kube::Client,
-    namespace: &str,
-    deployment_name: &str,
-) -> Result<Option<String>> {
-    let pod_api: Api<Pod> = Api::namespaced(client, namespace);
-
-    // Find pods for this deployment
-    let label_selector = format!("app={deployment_name}");
-    let pods = pod_api
-        .list(&kube::api::ListParams::default().labels(&label_selector))
-        .await?;
-
-    for pod in pods.items {
-        if let Some(pod_name) = &pod.metadata.name {
-            // Check if pod is running
-            if let Some(status) = &pod.status {
-                if let Some(phase) = &status.phase {
-                    if phase != "Running" {
-                        continue;
-                    }
-                }
-            }
-
-            // Get logs from the cloudflared container
-            let log_params = LogParams {
-                container: Some("cloudflared".to_string()),
-                tail_lines: Some(100), // Look at recent logs
-                ..Default::default()
-            };
-
-            match pod_api.logs(pod_name, &log_params).await {
-                Ok(logs) => {
-                    // Look for the tunnel URL pattern in logs
-                    for line in logs.lines() {
-                        if let Some(url) = extract_url_from_log_line(line) {
-                            info!("Found tunnel URL in logs: {url}");
-                            return Ok(Some(url));
-                        }
-                    }
-                }
-                Err(e) => {
-                    // Continue to next pod if logs aren't available yet
-                    info!("Could not get logs from pod {pod_name}: {e}");
-                }
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Extracts URL from a single log line if it matches the tunnel announcement pattern
-fn extract_url_from_log_line(line: &str) -> Option<String> {
-    // Look for the pattern: "https://....trycloudflare.com"
-    // The logs contain lines like:
-    // "2025-08-11T15:39:42Z INF |  https://coins-mj-geographical-inquire.trycloudflare.com  |"
-    if line.contains("trycloudflare.com") {
-        // Extract URL using regex-like pattern matching
-        if let Some(start) = line.find("https://") {
-            if let Some(end) = line[start..].find(" ") {
-                return Some(line[start..start + end].trim().to_string());
-            } else {
-                // URL might be at the end of the line
-                let url = line[start..].trim().trim_end_matches('|').trim();
-                if url.ends_with("trycloudflare.com") {
-                    return Some(url.to_string());
-                }
-            }
-        }
-    }
-    None
+    base: String,
+    account: String,
 }
 
 impl CloudflareApi {
-    fn new(auth_token: &str, account_id: &str) -> Self {
+    fn new(token: &str, account: &str) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {auth_token}")).unwrap(),
-        );
-        let client = reqwest::Client::builder().default_headers(headers).build().unwrap();
-        Self {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| Error::ConfigError("invalid Cloudflare API token header".into()))?;
+        authorization.set_sensitive(true);
+        headers.insert(AUTHORIZATION, authorization);
+        let client = reqwest::Client::builder()
+            .default_headers(headers)
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(20))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(cf_error)?;
+        Ok(Self {
             client,
-            account_id: account_id.to_string(),
-        }
+            base: CLOUDFLARE_API_URL.into(),
+            account: account.into(),
+        })
     }
 
-    async fn create_tunnel(&self, name: &str, tunnel_secret: &str) -> anyhow::Result<Tunnel> {
-        let payload = CreateTunnelPayload {
-            name,
-            config_src: "cloudflare",
-            tunnel_secret,
-        };
-        let res = self
-            .client
-            .post(format!(
-                "{}/accounts/{}/cfd_tunnel",
-                CLOUDFLARE_API_URL, self.account_id
-            ))
-            .json(&payload)
-            .send()
-            .await?
-            .text()
-            .await?;
-
-        let res: CloudflareApiResponse<Tunnel> = serde_json::from_str(&res)?;
-
-        if !res.success || res.result.is_none() {
-            anyhow::bail!(res.errors.first().map_or_else(
-                || "Unknown error".to_string(),
-                |e| format!("Cloudflare API error: {} - {}", e.code, e.message)
-            ));
-        }
-        Ok(res.result.unwrap())
+    fn from_binding(binding: &Binding) -> Result<Self> {
+        let token = binding
+            .data
+            .credentials
+            .get("api-token")
+            .ok_or_else(|| Error::ConfigError("binding has no Cloudflare API token".into()))?;
+        let account = binding
+            .data
+            .class
+            .spec
+            .cloudflare
+            .as_ref()
+            .and_then(|c| c.account_id.as_deref())
+            .ok_or_else(|| Error::ConfigError("binding has no Cloudflare account".into()))?;
+        Self::new(token, account)
     }
 
-    async fn delete_tunnel(&self, tunnel_id: &str) -> anyhow::Result<()> {
-        let res = self
-            .client
-            .delete(format!(
-                "{}/accounts/{}/cfd_tunnel/{}",
-                CLOUDFLARE_API_URL, self.account_id, tunnel_id
-            ))
-            .send()
-            .await?;
-
-        if !res.status().is_success() && res.status() != 404 {
-            let status = res.status();
-            let body = res
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response body>".to_string());
-            anyhow::bail!("Cloudflare API error: {} - {}", status, body);
+    async fn request<T: DeserializeOwned>(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<Value>,
+    ) -> Result<Option<ApiResponse<T>>> {
+        let mut url = reqwest::Url::parse(&format!("{}{path}", self.base)).map_err(cf_error)?;
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(key, value)| (key, value)));
         }
-        Ok(())
+        let mut request = self.client.request(method.clone(), url);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let mut response = request.send().await.map_err(cf_error)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND && matches!(method, Method::GET | Method::DELETE) {
+            return Ok(None);
+        }
+        let status = response.status();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(cf_error)? {
+            if bytes.len() + chunk.len() > 2 * 1024 * 1024 {
+                return Err(Error::CloudflareError("API response exceeded 2 MiB".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let envelope: ApiResponse<T> = serde_json::from_slice(&bytes)
+            .map_err(|_| Error::CloudflareError(format!("invalid API response (HTTP {status})")))?;
+        if !status.is_success() || !envelope.success {
+            let message = envelope
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.code, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(Error::CloudflareError(format!("HTTP {status}: {message}")));
+        }
+        Ok(Some(envelope))
     }
 
-    async fn list_zones(&self) -> anyhow::Result<Vec<Zone>> {
-        let res = self
-            .client
-            .get(format!("{CLOUDFLARE_API_URL}/zones"))
-            .send()
-            .await?
-            .text()
-            .await?;
-
-        let res: CloudflareApiResponse<Vec<Zone>> = serde_json::from_str(&res)?;
-
-        if !res.success || res.result.is_none() {
-            anyhow::bail!(res.errors.first().map_or_else(
-                || "Unknown error".to_string(),
-                |e| format!("Cloudflare API error: {} - {}", e.code, e.message)
-            ));
-        }
-        Ok(res.result.unwrap())
-    }
-
-    async fn find_zone_for_hostname(&self, hostname: &str) -> anyhow::Result<Option<Zone>> {
-        let zones = self.list_zones().await?;
-
-        // Find the most specific zone that matches the hostname
-        let mut best_match: Option<Zone> = None;
-        let mut best_match_len = 0;
-
-        for zone in zones {
-            if hostname.ends_with(&zone.name) && zone.name.len() > best_match_len {
-                best_match_len = zone.name.len();
-                best_match = Some(zone);
+    async fn list<T: DeserializeOwned>(&self, path: &str, query: &[(String, String)]) -> Result<Vec<T>> {
+        let mut items = Vec::new();
+        for page in 1..=1000 {
+            let mut query = query.to_vec();
+            query.extend([("page".into(), page.to_string()), ("per_page".into(), "50".into())]);
+            let response = self
+                .request::<Vec<T>>(Method::GET, path, &query, None)
+                .await?
+                .ok_or_else(|| Error::CloudflareError("list endpoint returned 404".into()))?;
+            let result = response
+                .result
+                .ok_or_else(|| Error::CloudflareError("list response has no result".into()))?;
+            let done = response
+                .result_info
+                .and_then(|r| r.total_pages)
+                .map(|pages| page >= pages)
+                .unwrap_or(result.len() < 50);
+            items.extend(result);
+            if done {
+                return Ok(items);
             }
         }
-
-        Ok(best_match)
+        Err(Error::CloudflareError("API pagination exceeded its bound".into()))
     }
 
-    async fn create_dns_record(
-        &self,
-        zone_id: &str,
-        record_type: &str,
-        name: &str,
-        content: &str,
-    ) -> anyhow::Result<DnsRecord> {
-        let payload = CreateDnsRecordPayload {
-            record_type,
-            name,
-            content,
-            ttl: 300,      // 5 minutes TTL
-            proxied: true, // Enable proxying for Cloudflare tunnels
-        };
+    async fn tunnels(&self, name: &str) -> Result<Vec<Tunnel>> {
+        let tunnels: Vec<Tunnel> = self
+            .list(
+                &format!("/accounts/{}/cfd_tunnel", self.account),
+                &[("name".into(), name.into()), ("is_deleted".into(), "false".into())],
+            )
+            .await?;
+        Ok(tunnels.into_iter().filter(|t| t.name == name).collect())
+    }
 
-        let res = self
-            .client
-            .post(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records"))
-            .json(&payload)
-            .send()
+    async fn tunnel(&self, id: &str) -> Result<Option<Tunnel>> {
+        Ok(self
+            .request::<Tunnel>(
+                Method::GET,
+                &format!("/accounts/{}/cfd_tunnel/{id}", self.account),
+                &[],
+                None,
+            )
             .await?
-            .text()
-            .await?;
-
-        let res: CloudflareApiResponse<DnsRecord> = serde_json::from_str(&res)?;
-
-        if !res.success || res.result.is_none() {
-            anyhow::bail!(res.errors.first().map_or_else(
-                || "Unknown error".to_string(),
-                |e| format!("Cloudflare API error: {} - {}", e.code, e.message)
-            ));
-        }
-        Ok(res.result.unwrap())
+            .and_then(|r| r.result)
+            .filter(|t| t.deleted_at.is_none()))
     }
 
-    async fn list_dns_records(&self, zone_id: &str, name: &str) -> anyhow::Result<Vec<DnsRecord>> {
-        let res = self
-            .client
-            .get(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records?name={name}"))
-            .send()
-            .await?
-            .text()
+    async fn records(&self, intent: &DnsIntent) -> Result<Vec<DnsRecord>> {
+        let records: Vec<DnsRecord> = self
+            .list(
+                &format!("/zones/{}/dns_records", intent.zone_id),
+                &[("name".into(), intent.hostname.clone())],
+            )
             .await?;
-
-        let res: CloudflareApiResponse<Vec<DnsRecord>> = serde_json::from_str(&res)?;
-
-        if !res.success || res.result.is_none() {
-            anyhow::bail!(res.errors.first().map_or_else(
-                || "Unknown error".to_string(),
-                |e| format!("Cloudflare API error: {} - {}", e.code, e.message)
-            ));
+        let mut records: Vec<_> = records
+            .into_iter()
+            .filter(|r| r.name.eq_ignore_ascii_case(&intent.hostname))
+            .collect();
+        if let Some(id) = &intent.record_id
+            && !records.iter().any(|r| &r.id == id)
+            && let Some(record) = self
+                .request::<DnsRecord>(
+                    Method::GET,
+                    &format!("/zones/{}/dns_records/{id}", intent.zone_id),
+                    &[],
+                    None,
+                )
+                .await?
+                .and_then(|r| r.result)
+        {
+            records.push(record);
         }
-        Ok(res.result.unwrap())
+        Ok(records)
     }
 
-    async fn delete_dns_record(&self, zone_id: &str, record_id: &str) -> anyhow::Result<()> {
-        let res = self
-            .client
-            .delete(format!("{CLOUDFLARE_API_URL}/zones/{zone_id}/dns_records/{record_id}"))
-            .send()
+    async fn delete_record(&self, zone: &str, id: &str) -> Result<()> {
+        self.request::<Value>(Method::DELETE, &format!("/zones/{zone}/dns_records/{id}"), &[], None)
             .await?;
-
-        if !res.status().is_success() && res.status() != 404 {
-            let status = res.status();
-            let body = res
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response body>".to_string());
-            anyhow::bail!("Cloudflare API error: {} - {}", status, body);
-        }
         Ok(())
     }
 }
 
+fn cf_error(error: impl std::fmt::Display) -> Error {
+    Error::CloudflareError(error.to_string())
+}
+
+async fn ensure_tunnel(api: &CloudflareApi, ctx: &ReconcileContext, binding: &mut Binding) -> Result<String> {
+    if binding.data.cloudflare.tunnel_name.is_none() {
+        let prefix = binding
+            .data
+            .class
+            .spec
+            .cloudflare
+            .as_ref()
+            .and_then(|c| c.tunnel_prefix.as_deref())
+            .unwrap_or("kube-");
+        let name = format!("{prefix}{}", binding.uid()?);
+        let mut bytes = [0u8; 32];
+        rand::rng().fill_bytes(&mut bytes);
+        binding.data.cloudflare.tunnel_name = Some(name);
+        binding.data.cloudflare.tunnel_secret = Some(general_purpose::STANDARD.encode(bytes));
+        binding.save(ctx.client.clone()).await?;
+    }
+    let name = binding
+        .data
+        .cloudflare
+        .tunnel_name
+        .as_deref()
+        .ok_or_else(|| Error::ConfigError("tunnel intent has no name".into()))?;
+    let secret = binding
+        .data
+        .cloudflare
+        .tunnel_secret
+        .as_deref()
+        .ok_or_else(|| Error::ConfigError("tunnel intent has no credential".into()))?;
+    if let Some(id) = &binding.data.cloudflare.tunnel_id {
+        if let Some(tunnel) = api.tunnel(id).await? {
+            if tunnel.config_src.as_deref() != Some("local") {
+                return Err(cf_error("persisted tunnel requires local configuration"));
+            }
+            return Ok(tunnel.id);
+        }
+        binding.data.cloudflare.tunnel_id = None;
+        binding.save(ctx.client.clone()).await?;
+        return Box::pin(ensure_tunnel(api, ctx, binding)).await;
+    }
+    let mut matches = api.tunnels(name).await?;
+    let tunnel = match matches.len() {
+        0 => api
+            .request::<Tunnel>(
+                Method::POST,
+                &format!("/accounts/{}/cfd_tunnel", api.account),
+                &[],
+                Some(json!({"name": name, "config_src": "local", "tunnel_secret": secret})),
+            )
+            .await?
+            .and_then(|r| r.result)
+            .ok_or_else(|| Error::CloudflareError("tunnel creation returned no identity".into()))?,
+        1 => {
+            let tunnel = matches.remove(0);
+            if tunnel.config_src.as_deref() != Some("local")
+                || binding
+                    .data
+                    .cloudflare
+                    .tunnel_id
+                    .as_ref()
+                    .is_some_and(|id| id != &tunnel.id)
+            {
+                return Err(Error::CloudflareError(
+                    "external tunnel identity conflicts with persisted intent".into(),
+                ));
+            }
+            tunnel
+        }
+        _ => {
+            return Err(Error::CloudflareError(
+                "multiple tunnels match the persisted intent".into(),
+            ));
+        }
+    };
+    if binding.data.cloudflare.tunnel_id.as_ref() != Some(&tunnel.id) {
+        binding.data.cloudflare.tunnel_id = Some(tunnel.id.clone());
+        binding.save(ctx.client.clone()).await?;
+    }
+    Ok(tunnel.id)
+}
+
+fn owner_marker(binding: &Binding) -> Result<String> {
+    Ok(format!("tlb binding {}", binding.uid()?))
+}
+
+async fn remove_dns(api: &CloudflareApi, intent: &DnsIntent, marker: &str) -> Result<()> {
+    for record in api.records(intent).await? {
+        if record.comment.as_deref() == Some(marker) {
+            api.delete_record(&intent.zone_id, &record.id).await?;
+        } else if intent.record_id.as_ref() == Some(&record.id) {
+            return Err(Error::CloudflareError(format!(
+                "DNS record {} no longer carries its ownership marker",
+                record.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_dns(
+    api: &CloudflareApi,
+    ctx: &ReconcileContext,
+    binding: &mut Binding,
+    desired: &BTreeSet<String>,
+    target: &str,
+) -> Result<()> {
+    let marker = owner_marker(binding)?;
+    for index in (0..binding.data.cloudflare.dns.len()).rev() {
+        if !desired.contains(&binding.data.cloudflare.dns[index].hostname) {
+            remove_dns(api, &binding.data.cloudflare.dns[index], &marker).await?;
+            binding.data.cloudflare.dns.remove(index);
+            binding.save(ctx.client.clone()).await?;
+        }
+    }
+    let zones: Vec<Zone> = if desired
+        .iter()
+        .any(|name| !binding.data.cloudflare.dns.iter().any(|d| &d.hostname == name))
+    {
+        api.list("/zones", &[("account.id".into(), api.account.clone())])
+            .await?
+    } else {
+        Vec::new()
+    };
+    for hostname in desired {
+        let index = if let Some(index) = binding.data.cloudflare.dns.iter().position(|d| &d.hostname == hostname) {
+            index
+        } else {
+            let zone = zones
+                .iter()
+                .filter(|zone| hostname == &zone.name || hostname.ends_with(&format!(".{}", zone.name)))
+                .max_by_key(|zone| zone.name.len())
+                .ok_or_else(|| Error::CloudflareError(format!("no accessible DNS zone for {hostname}")))?;
+            binding.data.cloudflare.dns.push(DnsIntent {
+                zone_id: zone.id.clone(),
+                hostname: hostname.clone(),
+                record_id: None,
+            });
+            binding.save(ctx.client.clone()).await?;
+            binding.data.cloudflare.dns.len() - 1
+        };
+        let intent = &binding.data.cloudflare.dns[index];
+        let records = api.records(intent).await?;
+        if records.iter().any(|r| r.comment.as_deref() != Some(&marker)) {
+            return Err(Error::CloudflareError(format!(
+                "refusing to adopt existing DNS records for {hostname}"
+            )));
+        }
+        if records.len() > 1 {
+            return Err(Error::CloudflareError(format!(
+                "multiple owned DNS records for {hostname}"
+            )));
+        }
+        let payload =
+            json!({"type": "CNAME", "name": hostname, "content": target, "ttl": 1, "proxied": true, "comment": marker});
+        let record = match records.into_iter().next() {
+            Some(record)
+                if record.kind == "CNAME"
+                    && record.content == target
+                    && record.name.eq_ignore_ascii_case(hostname)
+                    && record.proxied
+                    && record.ttl == 1 =>
+            {
+                record
+            }
+            Some(record) => api
+                .request::<DnsRecord>(
+                    Method::PUT,
+                    &format!("/zones/{}/dns_records/{}", intent.zone_id, record.id),
+                    &[],
+                    Some(payload),
+                )
+                .await?
+                .and_then(|r| r.result)
+                .ok_or_else(|| cf_error("DNS update returned no record"))?,
+            None => api
+                .request::<DnsRecord>(
+                    Method::POST,
+                    &format!("/zones/{}/dns_records", intent.zone_id),
+                    &[],
+                    Some(payload),
+                )
+                .await?
+                .and_then(|r| r.result)
+                .ok_or_else(|| cf_error("DNS creation returned no record"))?,
+        };
+        if binding.data.cloudflare.dns[index].record_id.as_ref() != Some(&record.id) {
+            binding.data.cloudflare.dns[index].record_id = Some(record.id);
+            binding.save(ctx.client.clone()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn quick_identity(pod: &Pod) -> Option<String> {
+    if !pod
+        .status
+        .as_ref()?
+        .conditions
+        .as_ref()?
+        .iter()
+        .any(|c| c.type_ == "Ready" && c.status == "True")
+    {
+        return None;
+    }
+    quick_container_identity(pod)
+}
+
+fn quick_container_identity(pod: &Pod) -> Option<String> {
+    if pod.metadata.deletion_timestamp.is_some() {
+        return None;
+    }
+    let status = pod.status.as_ref()?;
+    let container = status
+        .container_statuses
+        .as_ref()?
+        .iter()
+        .find(|c| c.name == "cloudflared")?;
+    container.state.as_ref()?.running.as_ref()?;
+    Some(format!(
+        "{}:{}:{}",
+        pod.uid()?,
+        container.restart_count,
+        container.container_id.as_deref()?
+    ))
+}
+
+fn extract_url_from_log_line(line: &str) -> Option<String> {
+    line.split_whitespace().find_map(|word| {
+        let url = reqwest::Url::parse(word.trim_matches('|')).ok()?;
+        let host = url.host_str()?;
+        (url.scheme() == "https"
+            && host.ends_with(".trycloudflare.com")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none())
+        .then(|| host.to_string())
+    })
+}
+
+async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Result<Vec<String>> {
+    let namespace = binding
+        .data
+        .service
+        .namespace()
+        .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+    let api: Api<Pod> = Api::namespaced(ctx.client.clone(), &namespace);
+    let pods = api.list(&ListParams::default().labels(&ctx.selector()?)).await?;
+    let mut current = BTreeMap::new();
+    let mut announced = Vec::new();
+    for pod in pods {
+        let Some(identity) = quick_container_identity(&pod) else {
+            continue;
+        };
+        let ready = quick_identity(&pod).is_some();
+        if let Some(hostname) = binding.data.cloudflare.quick_urls.get(&identity) {
+            current.insert(identity, hostname.clone());
+            if ready {
+                announced.push(hostname.clone());
+            }
+            continue;
+        }
+        if !ready {
+            continue;
+        }
+        let logs = api
+            .logs(
+                &pod.name_any(),
+                &LogParams {
+                    container: Some("cloudflared".into()),
+                    tail_lines: Some(1000),
+                    limit_bytes: Some(262144),
+                    ..Default::default()
+                },
+            )
+            .await;
+        match logs {
+            Ok(logs) => {
+                if let Some(hostname) = logs.lines().find_map(extract_url_from_log_line) {
+                    current.insert(identity, hostname.clone());
+                    announced.push(hostname);
+                }
+            }
+            Err(err) => log::warn!("cannot discover quick tunnel for {namespace}/{}: {err}", pod.name_any()),
+        }
+    }
+    if current != binding.data.cloudflare.quick_urls {
+        binding.data.cloudflare.quick_urls = current;
+        binding.save(ctx.client.clone()).await?;
+    }
+    Ok(announced)
+}
+
+#[async_trait]
+impl TunnelProvider for CloudflareConfig {
+    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+        let options = crate::config::validate_service(service, &ctx.binding.data.class)?;
+        let namespace = service
+            .namespace()
+            .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+        let port = service
+            .spec
+            .as_ref()
+            .and_then(|s| s.ports.as_ref())
+            .and_then(|p| p.first())
+            .ok_or_else(|| Error::ConfigError("Service has no port".into()))?;
+        let protocol = determine_port_protocol(port, service.annotations().get("tlb.io/protocol").map(String::as_str));
+        let origin = format!("{protocol}://{}.{}.svc:{}", service.name_any(), namespace, port.port);
+        let mut binding = ctx.binding.clone();
+        let resource_name = ctx.resource_name(self.resource_prefix.as_deref().unwrap_or("cf-"), "")?;
+        let mut volumes = Vec::new();
+        let mut mounts = Vec::new();
+        let mut rotation = BTreeMap::new();
+        let mut hostnames = Vec::new();
+        let mut dns_error = None;
+        let mut args = vec![
+            "tunnel".into(),
+            "--no-autoupdate".into(),
+            "--metrics".into(),
+            "0.0.0.0:2000".into(),
+        ];
+        if self.api_token_ref.is_some() {
+            let api = CloudflareApi::from_binding(&binding)?;
+            let id = ensure_tunnel(&api, ctx, &mut binding).await?;
+            let secret_name = ctx.resource_name("cf-", "-creds")?;
+            let config_name = ctx.resource_name("cf-", "-config")?;
+            let secret = Secret {
+                metadata: ctx.metadata(&secret_name)?,
+                data: Some(BTreeMap::from([(
+                    "credentials.json".into(),
+                    ByteString(serde_json::to_vec(&json!({
+                        "AccountTag": self.account_id, "TunnelID": id, "TunnelSecret": binding.data.cloudflare.tunnel_secret
+                    }))?),
+                )])),
+                ..Default::default()
+            };
+            let config = ConfigMap { metadata: ctx.metadata(&config_name)?, data: Some(BTreeMap::from([("config.yaml".into(), serde_yaml::to_string(&json!({
+                "tunnel": id, "credentials-file": "/etc/cloudflared/creds/credentials.json", "ingress": [{ "service": origin }]
+            })).map_err(cf_error)?)])), ..Default::default() };
+            let secret =
+                crate::managed::apply(ctx, &Api::<Secret>::namespaced(ctx.client.clone(), &namespace), &secret).await?;
+            let config = crate::managed::apply(
+                ctx,
+                &Api::<ConfigMap>::namespaced(ctx.client.clone(), &namespace),
+                &config,
+            )
+            .await?;
+            rotation.insert(
+                "controller.tlb.io/secret-version".into(),
+                secret.resource_version().unwrap_or_default(),
+            );
+            rotation.insert(
+                "controller.tlb.io/config-version".into(),
+                config.resource_version().unwrap_or_default(),
+            );
+            volumes.push(Volume {
+                name: "credentials".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    secret_name: Some(secret_name),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            volumes.push(Volume {
+                name: "config".into(),
+                config_map: Some(k8s_openapi::api::core::v1::ConfigMapVolumeSource {
+                    name: config_name,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            mounts.push(VolumeMount {
+                name: "credentials".into(),
+                mount_path: "/etc/cloudflared/creds".into(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+            mounts.push(VolumeMount {
+                name: "config".into(),
+                mount_path: "/etc/cloudflared/config".into(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+            args.extend([
+                "--config".into(),
+                "/etc/cloudflared/config/config.yaml".into(),
+                "run".into(),
+            ]);
+            let target = format!("{id}.cfargotunnel.com");
+            let desired: BTreeSet<String> = if matches!(self.announce_type, Some(CloudflareAnnounceType::Internal)) {
+                BTreeSet::new()
+            } else {
+                options
+                    .dns
+                    .as_deref()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            };
+            if let Err(error) = reconcile_dns(&api, ctx, &mut binding, &desired, &target).await {
+                dns_error = Some(error);
+            }
+            hostnames = if desired.is_empty() || dns_error.is_some() {
+                vec![target]
+            } else {
+                desired.into_iter().collect()
+            };
+        } else {
+            args.extend(["--url".into(), origin]);
+        }
+        let labels = ctx.labels()?;
+        let deployment = Deployment {
+            metadata: ctx.metadata(&resource_name)?,
+            spec: Some(DeploymentSpec {
+                replicas: Some(options.replicas),
+                selector: LabelSelector {
+                    match_labels: Some(labels.clone()),
+                    ..Default::default()
+                },
+                template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(labels),
+                        annotations: Some(rotation),
+                        ..Default::default()
+                    }),
+                    spec: Some(PodSpec {
+                        automount_service_account_token: Some(false),
+                        affinity: crate::build_pod_affinity_for_service(service).map(|pod_affinity| Affinity {
+                            pod_affinity: Some(pod_affinity),
+                            ..Default::default()
+                        }),
+                        node_selector: options.node_selector.map(|s| {
+                            s.split(',')
+                                .filter_map(|s| s.trim().split_once('=').map(|(k, v)| (k.into(), v.into())))
+                                .collect()
+                        }),
+                        containers: vec![Container {
+                            name: "cloudflared".into(),
+                            image: Some(self.image.clone().unwrap_or(DEFAULT_IMAGE.into())),
+                            args: Some(args),
+                            volume_mounts: Some(mounts),
+                            readiness_probe: Some(Probe {
+                                http_get: Some(HTTPGetAction {
+                                    path: Some("/ready".into()),
+                                    port: IntOrString::Int(2000),
+                                    ..Default::default()
+                                }),
+                                period_seconds: Some(5),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        volumes: Some(volumes),
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        crate::managed::apply(
+            ctx,
+            &Api::<Deployment>::namespaced(ctx.client.clone(), &namespace),
+            &deployment,
+        )
+        .await?;
+        if self.api_token_ref.is_none() {
+            hostnames = quick_hostnames(ctx, &mut binding).await?;
+        }
+        crate::managed::patch_ingress(
+            ctx,
+            service,
+            hostnames
+                .into_iter()
+                .map(|hostname| LoadBalancerIngress {
+                    hostname: Some(hostname),
+                    ..Default::default()
+                })
+                .collect(),
+        )
+        .await?;
+        if let Some(error) = dns_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    async fn cleanup_service(&self, ctx: &ReconcileContext, _service: &Service) -> Result<()> {
+        crate::managed::cleanup_workloads(ctx).await?;
+        let mut binding = ctx.binding.clone();
+        if self.api_token_ref.is_some() {
+            let api = CloudflareApi::from_binding(&binding)?;
+            let marker = owner_marker(&binding)?;
+            while let Some(intent) = binding.data.cloudflare.dns.last() {
+                remove_dns(&api, intent, &marker).await?;
+                binding.data.cloudflare.dns.pop();
+                binding.save(ctx.client.clone()).await?;
+            }
+            if let Some(name) = &binding.data.cloudflare.tunnel_name {
+                let tunnels = if let Some(id) = &binding.data.cloudflare.tunnel_id {
+                    api.tunnel(id).await?.into_iter().collect()
+                } else {
+                    api.tunnels(name).await?
+                };
+                if tunnels.len() > 1 {
+                    return Err(cf_error("multiple tunnels match cleanup identity"));
+                }
+                for tunnel in tunnels {
+                    if binding
+                        .data
+                        .cloudflare
+                        .tunnel_id
+                        .as_ref()
+                        .is_some_and(|id| id != &tunnel.id)
+                        || tunnel.config_src.as_deref() != Some("local")
+                    {
+                        return Err(cf_error("tunnel cleanup identity conflict"));
+                    }
+                    api.request::<Value>(
+                        Method::DELETE,
+                        &format!("/accounts/{}/cfd_tunnel/{}", api.account, tunnel.id),
+                        &[],
+                        None,
+                    )
+                    .await?;
+                }
+            }
+        }
+        crate::managed::cleanup_storage(ctx).await
+    }
+}
 /// Well-known port to protocol mappings
 const WELL_KNOWN_PORTS: &[(u16, &str)] = &[
     (80, "http"),
@@ -369,7 +805,7 @@ const WELL_KNOWN_PORTS: &[(u16, &str)] = &[
 ];
 
 /// Determines the protocol for a given service port based on annotations, port name, and well-known ports
-fn determine_port_protocol(port: &ServicePort, protocol_annotation: Option<&str>) -> String {
+pub(crate) fn determine_port_protocol(port: &ServicePort, protocol_annotation: Option<&str>) -> String {
     // 1. Check explicit protocol annotation first
     if let Some(annotation) = protocol_annotation {
         // Handle port-specific annotations like "80:http,22:ssh"
@@ -385,10 +821,10 @@ fn determine_port_protocol(port: &ServicePort, protocol_annotation: Option<&str>
                 }
 
                 // Match by port name
-                if let Some(port_name) = &port.name {
-                    if port_spec == port_name {
-                        return protocol.to_string();
-                    }
+                if let Some(port_name) = &port.name
+                    && port_spec == port_name
+                {
+                    return protocol.to_string();
                 }
             }
         }
@@ -430,1296 +866,206 @@ fn determine_port_protocol(port: &ServicePort, protocol_annotation: Option<&str>
     }
 }
 
-/// Generates cloudflared configuration YAML content
-fn generate_cloudflared_config(
-    tunnel_id: &str,
-    service_name: &str,
-    namespace: &str,
-    ports: &[ServicePort],
-    protocol_annotation: Option<&str>,
-) -> String {
-    let mut config =
-        format!("tunnel: {tunnel_id}\ncredentials-file: /etc/cloudflared/creds/credentials.json\ningress:\n");
-
-    // Add ingress rules for each port
-    for port in ports {
-        let protocol = determine_port_protocol(port, protocol_annotation);
-        let service_url = format!("{}://{}.{}:{}", protocol, service_name, namespace, port.port);
-
-        config.push_str(&format!("  - service: {service_url}\n"));
-    }
-
-    config
-}
-
-/// Manages DNS records for a service - either creates or deletes them based on the operation
-/// Returns DnsManagementResult with both successful and failed hostnames
-async fn manage_dns_records(
-    cf_client: &CloudflareApi,
-    dns_annotation: &str,
-    tunnel_hostname: &str,
-    operation: DnsOperation,
-) -> DnsManagementResult {
-    info!("manage_dns_records called with operation: {operation:?}");
-    let mut result = DnsManagementResult::new();
-    let hostnames: Vec<&str> = dns_annotation.split(',').map(|s| s.trim()).collect();
-
-    for hostname in hostnames {
-        if hostname.is_empty() {
-            continue;
-        }
-
-        // Find the appropriate zone for this hostname
-        match cf_client.find_zone_for_hostname(hostname).await {
-            Ok(Some(zone)) => {
-                info!("Found zone '{}' for hostname '{}'", zone.name, hostname);
-
-                match operation {
-                    DnsOperation::Create => {
-                        // Check if DNS record already exists
-                        match cf_client.list_dns_records(&zone.id, hostname).await {
-                            Ok(existing_records) => {
-                                let cname_exists = existing_records
-                                    .iter()
-                                    .any(|record| record.record_type == "CNAME" && record.content == tunnel_hostname);
-
-                                if !cname_exists {
-                                    // Create CNAME record pointing to the tunnel
-                                    match cf_client
-                                        .create_dns_record(&zone.id, "CNAME", hostname, tunnel_hostname)
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            info!(
-                                                "Created CNAME record for '{hostname}' pointing to '{tunnel_hostname}'"
-                                            );
-                                            result.successful_hostnames.push(hostname.to_string());
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to create DNS record for '{hostname}': {e}");
-                                            result
-                                                .failed_hostnames
-                                                .push((hostname.to_string(), format!("create DNS record: {e}")));
-                                        }
-                                    }
-                                } else {
-                                    info!("CNAME record for '{hostname}' already exists");
-                                    result.successful_hostnames.push(hostname.to_string());
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to list DNS records for '{hostname}': {e}");
-                                result
-                                    .failed_hostnames
-                                    .push((hostname.to_string(), format!("list DNS records for creation: {e}")));
-                            }
-                        }
-                    }
-                    DnsOperation::Delete => {
-                        // List DNS records for this hostname and delete matching ones
-                        match cf_client.list_dns_records(&zone.id, hostname).await {
-                            Ok(records) => {
-                                // Find CNAME records pointing to our tunnel
-                                for record in records {
-                                    if record.record_type == "CNAME" && record.content == tunnel_hostname {
-                                        match cf_client.delete_dns_record(&zone.id, &record.id).await {
-                                            Ok(_) => {
-                                                info!(
-                                                    "Deleted DNS record for '{hostname}' pointing to tunnel '{tunnel_hostname}'"
-                                                );
-                                                result.successful_hostnames.push(hostname.to_string());
-                                            }
-                                            Err(e) => {
-                                                error!("Failed to delete DNS record for '{hostname}': {e}");
-                                                result
-                                                    .failed_hostnames
-                                                    .push((hostname.to_string(), format!("delete DNS record: {e}")));
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to list DNS records for '{hostname}': {e}");
-                                result
-                                    .failed_hostnames
-                                    .push((hostname.to_string(), format!("list DNS records for deletion: {e}")));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(None) => {
-                let action = match operation {
-                    DnsOperation::Create => "creation",
-                    DnsOperation::Delete => "cleanup",
-                };
-                error!("No Cloudflare zone found for hostname '{hostname}' during {action}");
-                result
-                    .failed_hostnames
-                    .push((hostname.to_string(), format!("no zone found during {action}")));
-            }
-            Err(e) => {
-                let action = match operation {
-                    DnsOperation::Create => "creation",
-                    DnsOperation::Delete => "cleanup",
-                };
-                error!("Failed to find zone for hostname '{hostname}' during {action}: {e}");
-                result
-                    .failed_hostnames
-                    .push((hostname.to_string(), format!("find zone during {action}: {e}")));
-            }
-        }
-    }
-
-    result
-}
-
-#[derive(Clone, Copy, Debug)]
-enum DnsOperation {
-    Create,
-    Delete,
-}
-
-/// Result of DNS record management operations
-#[derive(Debug)]
-struct DnsManagementResult {
-    /// Hostnames that were successfully processed
-    successful_hostnames: Vec<String>,
-    /// Errors for hostnames that failed to be processed
-    failed_hostnames: Vec<(String, String)>, // (hostname, error)
-}
-
-impl DnsManagementResult {
-    fn new() -> Self {
-        Self {
-            successful_hostnames: Vec::new(),
-            failed_hostnames: Vec::new(),
-        }
-    }
-
-    fn has_successes(&self) -> bool {
-        !self.successful_hostnames.is_empty()
-    }
-
-    fn has_failures(&self) -> bool {
-        !self.failed_hostnames.is_empty()
-    }
-}
-
-#[async_trait]
-impl TunnelProvider for CloudflareConfig {
-    fn provider_type(&self) -> crate::ProviderType {
-        crate::ProviderType::Cloudflare
-    }
-
-    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let owner_references = vec![OwnerReference {
-            api_version: "v1".into(),
-            kind: "Service".into(),
-            name: service.name_any(),
-            uid: service.metadata.uid.clone().unwrap_or_default(),
-            controller: Some(false),
-            block_owner_deletion: Some(true),
-        }];
-
-        // Parse service annotations using the existing ServiceAnnotations struct
-        let service_annotations =
-            ServiceAnnotations::from(service.metadata.annotations.as_ref().cloned().unwrap_or_default());
-
-        // Get service ports and protocol annotation
-        let ports = service
-            .spec
-            .as_ref()
-            .and_then(|s| s.ports.as_ref())
-            .cloned()
-            .unwrap_or_default();
-        let protocol_annotation = service
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get("tlb.io/protocol"))
-            .map(|s| s.as_str());
-
-        // Determine tunnel mode based on presence of API credentials
-        // Use Quick mode if no API credentials are provided, otherwise use API mode
-        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
-
-        if use_api_mode {
-            self.reconcile_service_api_mode(
-                ctx,
-                service,
-                owner_references,
-                service_annotations,
-                ports,
-                protocol_annotation,
-            )
-            .await
-        } else {
-            self.reconcile_service_quick_mode(
-                ctx,
-                service,
-                owner_references,
-                service_annotations,
-                ports,
-                protocol_annotation,
-            )
-            .await
-        }
-    }
-
-    async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        // Determine tunnel mode based on presence of API credentials
-        // Use Quick mode if no API credentials are provided, otherwise use API mode
-        let use_api_mode = self.api_token_ref.is_some() && self.account_id.is_some();
-
-        if use_api_mode {
-            self.cleanup_service_api_mode(ctx, service).await
-        } else {
-            self.cleanup_service_quick_mode(ctx, service).await
-        }
-    }
-}
-
-impl CloudflareConfig {
-    async fn reconcile_service_api_mode(
-        &self,
-        ctx: &ReconcileContext,
-        service: &Service,
-        owner_references: Vec<OwnerReference>,
-        service_annotations: ServiceAnnotations,
-        ports: Vec<ServicePort>,
-        protocol_annotation: Option<&str>,
-    ) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-
-        // Validate api_token_ref and account_id configuration for API mode
-        let api_token_ref = self.api_token_ref.as_ref().ok_or_else(|| {
-            Error::ConfigError(format!(
-                "API mode requires api_token_ref to be set for service '{svc_name}'"
-            ))
-        })?;
-        let account_id = self.account_id.as_ref().ok_or_else(|| {
-            Error::ConfigError(format!(
-                "API mode requires account_id to be set for service '{svc_name}'"
-            ))
-        })?;
-
-        if api_token_ref.name.is_empty() || api_token_ref.key.is_empty() {
-            return Err(Error::ConfigError(format!(
-                "Invalid Cloudflare configuration for service '{}': api_token_ref name='{}' key='{}' cannot be empty",
-                svc_name, api_token_ref.name, api_token_ref.key
-            )));
-        }
-
-        let api_token = crate::get_secret_value(
-            &ctx.client,
-            api_token_ref,
-            &svc_namespace,
-        )
-        .await
-        .map_err(|e| Error::ConfigError(format!(
-            "Failed to get API token secret for service '{}' in namespace '{}': {} (in cloudflare::reconcile_service at {}:{})",
-            svc_name, svc_namespace, e, file!(), line!()
-        )))?;
-
-        let cf_client = CloudflareApi::new(&api_token, account_id);
-
-        let resource_prefix = self
-            .resource_prefix
-            .clone()
-            .unwrap_or(DEFAULT_RESOURCE_PREFIX.to_string());
-        let secret_name = format!("{resource_prefix}{svc_name}");
-        let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-
-        let existing_secret = secret_api.get_opt(&secret_name).await?;
-
-        // TODO(@niklas): Handle the case where the Tunnel no longer exists in Cloudflare.
-
-        if let Some(secret) = existing_secret {
-            if secret.metadata.deletion_timestamp.is_some() {
-                info!("Secret {secret_name} for service {svc_name} is being deleted, cleaning up Cloudflare tunnel");
-
-                if let Some(data) = secret.data {
-                    if let Some(tunnel_id_bytes) = data.get("tunnel-id") {
-                        let tunnel_id = String::from_utf8(tunnel_id_bytes.0.clone()).unwrap();
-
-                        // TODO(@niklas): Handle the tunnel cleanup in cleanup_service(), such that it is also called
-                        //                when the tunnel class is deleted.
-                        if let Err(e) = cf_client.delete_tunnel(&tunnel_id).await {
-                            error!("Failed to delete Cloudflare tunnel {tunnel_id}: {e}");
-                            return Err(Error::CloudflareError(e.to_string()));
-                        }
-                        info!("Successfully deleted Cloudflare tunnel {tunnel_id}");
-                    }
-                }
-
-                // Remove finalizer
-                let mut finalizers = secret.metadata.finalizers.unwrap_or_default();
-                finalizers.retain(|f| f != FINALIZER_NAME);
-                secret_api
-                    .patch(
-                        &secret_name,
-                        &PatchParams::default(),
-                        &Patch::Merge(json!({
-                            "metadata": {
-                                "finalizers": finalizers
-                            }
-                        })),
-                    )
-                    .await?;
-
-                return Ok(());
-            }
-        }
-
-        let tunnel_id = if let Some(secret) = secret_api.get_opt(&secret_name).await? {
-            let data = secret.data.unwrap();
-            String::from_utf8(data.get("tunnel-id").unwrap().0.clone()).unwrap()
-        } else {
-            info!("No secret found for service {svc_name}, creating new Cloudflare tunnel");
-            let tunnel_prefix = self.tunnel_prefix.clone().unwrap_or(DEFAULT_TUNNEL_PREFIX.to_string());
-            let tunnel_name = format!("{tunnel_prefix}{svc_namespace}-{svc_name}");
-
-            // Generate a random 32-byte tunnel secret and encode it as base64
-            let mut tunnel_secret_bytes = [0u8; 32];
-            rand::thread_rng().fill_bytes(&mut tunnel_secret_bytes);
-            let tunnel_secret = general_purpose::STANDARD.encode(tunnel_secret_bytes);
-
-            let tunnel = cf_client
-            .create_tunnel(&tunnel_name, &tunnel_secret)
-            .await
-            .map_err(|e| Error::CloudflareError(format!(
-                "Failed to create Cloudflare tunnel '{}' for service '{}' in namespace '{}': {} (in cloudflare::reconcile_service at {}:{})",
-                tunnel_name, svc_name, svc_namespace, e, file!(), line!()
-            )))?;
-
-            // Create the credentials.json file for cloudflared
-            let credentials_json = json!({
-                "AccountTag": account_id,
-                "TunnelSecret": tunnel_secret,
-                "TunnelID": tunnel.id
-            });
-
-            let secret_data = BTreeMap::from([
-                ("tunnel-id".to_string(), ByteString(tunnel.id.clone().into_bytes())),
-                (
-                    "tunnel-secret".to_string(),
-                    ByteString(tunnel_secret.clone().into_bytes()),
-                ),
-                (
-                    "credentials.json".to_string(),
-                    ByteString(credentials_json.to_string().into_bytes()),
-                ),
-            ]);
-
-            let secret = Secret {
-                metadata: ObjectMeta {
-                    name: Some(secret_name.clone()),
-                    namespace: Some(svc_namespace.clone()),
-                    finalizers: Some(vec![FINALIZER_NAME.to_string()]),
-                    owner_references: Some(owner_references.clone()),
-                    labels: Some(BTreeMap::from([
-                        (
-                            FOR_TUNNEL_CLASS_LABEL.to_string(),
-                            ctx.metadata.name.as_ref().unwrap().to_string(),
-                        ),
-                        (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-                        (PROVIDER_LABEL.to_string(), "cloudflare".to_string()),
-                    ])),
-                    ..Default::default()
-                },
-                data: Some(secret_data),
-                ..Default::default()
-            };
-
-            secret_api.create(&PostParams::default(), &secret).await?;
-            info!("Created secret {secret_name} for service {svc_name}");
-
-            tunnel.id
-        };
-
-        // Generate cloudflared configuration
-        let config_content =
-            generate_cloudflared_config(&tunnel_id, &svc_name, &svc_namespace, &ports, protocol_annotation);
-
-        // Create ConfigMap with cloudflared configuration
-        let config_name = format!("{resource_prefix}{svc_name}-config");
-        let configmap_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-
-        let configmap = ConfigMap {
-            metadata: ObjectMeta {
-                name: Some(config_name.clone()),
-                namespace: Some(svc_namespace.clone()),
-                owner_references: Some(owner_references.clone()),
-                labels: Some(BTreeMap::from([
-                    (
-                        FOR_TUNNEL_CLASS_LABEL.to_string(),
-                        ctx.metadata.name.as_ref().unwrap().to_string(),
-                    ),
-                    (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-                    (PROVIDER_LABEL.to_string(), "cloudflare".to_string()),
-                ])),
-                ..Default::default()
-            },
-            data: Some(BTreeMap::from([("config.yaml".to_string(), config_content)])),
-            ..Default::default()
-        };
-
-        configmap_api
-            .patch(
-                &config_name,
-                &PatchParams::apply("tlb-controller"),
-                &Patch::Apply(&configmap),
-            )
-            .await?;
-
-        info!("Created/updated cloudflared config {config_name} for service {svc_name}");
-
-        // Fetch current configmap to get its resource version.
-        let configmap = configmap_api.get(&config_name).await.map_err(|e| {
-            Error::CloudflareError(format!(
-                "Failed to get ConfigMap '{config_name}' for service '{svc_name}': {e}"
-            ))
-        })?;
-        let config_version = configmap
-            .metadata
-            .resource_version
-            .unwrap_or_else(|| "unknown".to_string());
-
-        // Get the secret to include its resource version in pod labels for automatic rotation
-        let secret = secret_api.get(&secret_name).await?;
-        let secret_version = secret
-            .metadata
-            .resource_version
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let deployment_name = format!("{resource_prefix}{svc_name}");
-        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-
-        let deployment = Deployment {
-            metadata: ObjectMeta {
-                name: Some(deployment_name.clone()),
-                namespace: Some(svc_namespace.clone()),
-                owner_references: Some(owner_references),
-                labels: Some(BTreeMap::from([
-                    (
-                        FOR_TUNNEL_CLASS_LABEL.to_string(),
-                        ctx.metadata.name.as_ref().unwrap().to_string(),
-                    ),
-                    (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-                    (PROVIDER_LABEL.to_string(), "cloudflare".to_string()),
-                ])),
-                ..Default::default()
-            },
-            spec: Some(DeploymentSpec {
-                replicas: Some(1),
-                strategy: Some(DeploymentStrategy {
-                    type_: Some("RollingUpdate".to_string()),
-                    rolling_update: Some(RollingUpdateDeployment {
-                        max_surge: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1)),
-                        max_unavailable: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0)),
-                    }),
-                }),
-                selector: LabelSelector {
-                    match_labels: Some(BTreeMap::from([("app".to_string(), deployment_name.clone())])),
-                    match_expressions: None,
-                },
-                template: PodTemplateSpec {
-                    metadata: Some(ObjectMeta {
-                        labels: Some(BTreeMap::from([
-                            ("app".to_string(), deployment_name.clone()),
-                            (
-                                "controller.tlb.io/config-version".to_string(),
-                                format!("{secret_version}-{config_version}"),
-                            ),
-                        ])),
-                        ..Default::default()
-                    }),
-                    spec: Some(PodSpec {
-                        affinity: crate::build_pod_affinity_for_service(service).map(|pod_affinity| {
-                            k8s_openapi::api::core::v1::Affinity {
-                                pod_affinity: Some(pod_affinity),
-                                ..Default::default()
-                            }
-                        }),
-                        containers: vec![Container {
-                            name: "cloudflared".to_string(),
-                            image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
-                            args: Some(vec![
-                                "tunnel".to_string(),
-                                "--no-autoupdate".to_string(),
-                                "--config".to_string(),
-                                "/etc/cloudflared/config/config.yaml".to_string(),
-                                "run".to_string(),
-                            ]),
-                            volume_mounts: Some(vec![
-                                VolumeMount {
-                                    name: "tunnel-credentials".to_string(),
-                                    mount_path: "/etc/cloudflared/creds".to_string(),
-                                    read_only: Some(true),
-                                    ..Default::default()
-                                },
-                                VolumeMount {
-                                    name: "tunnel-config".to_string(),
-                                    mount_path: "/etc/cloudflared/config".to_string(),
-                                    read_only: Some(true),
-                                    ..Default::default()
-                                },
-                            ]),
-                            ..Default::default()
-                        }],
-                        volumes: Some(vec![
-                            Volume {
-                                name: "tunnel-credentials".to_string(),
-                                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                                    secret_name: Some(secret_name.clone()),
-                                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                                        key: "credentials.json".to_string(),
-                                        path: "credentials.json".to_string(),
-                                        ..Default::default()
-                                    }]),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            Volume {
-                                name: "tunnel-config".to_string(),
-                                config_map: Some(k8s_openapi::api::core::v1::ConfigMapVolumeSource {
-                                    name: config_name.clone(),
-                                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                                        key: "config.yaml".to_string(),
-                                        path: "config.yaml".to_string(),
-                                        ..Default::default()
-                                    }]),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                        ]),
-                        ..Default::default()
-                    }),
-                },
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        deployment_api
-            .patch(
-                &deployment_name,
-                &PatchParams::apply("tlb-controller"),
-                &Patch::Apply(&deployment),
-            )
-            .await?;
-
-        info!("Reconciled cloudflared deployment {deployment_name} for service {svc_name}");
-
-        // Handle DNS configuration based on announce_type
-        let tunnel_hostname = format!("{tunnel_id}.cfargotunnel.com");
-        let mut ingress_hostnames = vec![];
-
-        // Get the announce type, defaulting to External
-        let announce_type = self.announce_type.as_ref().unwrap_or(&CloudflareAnnounceType::External);
-
-        match announce_type {
-            CloudflareAnnounceType::Internal => {
-                // Internal mode: only use the tunnel hostname, no DNS record management
-                info!("Using Internal announce mode for service '{svc_name}' - only tunnel hostname will be announced");
-                ingress_hostnames.push(tunnel_hostname.clone());
-            }
-            CloudflareAnnounceType::External => {
-                // External mode: try to create DNS records, fall back to internal if that fails
-                if let Some(dns_annotation) = &service_annotations.dns {
-                    let dns_result =
-                        manage_dns_records(&cf_client, dns_annotation, &tunnel_hostname, DnsOperation::Create).await;
-
-                    if dns_result.has_successes() {
-                        // At least some DNS records were created successfully
-                        info!(
-                            "Successfully created DNS records for service '{}': {}",
-                            svc_name,
-                            dns_result.successful_hostnames.join(", ")
-                        );
-
-                        // Post events for any failed DNS records
-                        if dns_result.has_failures() {
-                            for (hostname, error) in &dns_result.failed_hostnames {
-                                ctx.events
-                                    .publish(
-                                        &service.object_ref(&()),
-                                        kube::runtime::events::EventType::Warning,
-                                        "DNSRecordFailed".into(),
-                                        Some(format!("Failed to create DNS record for '{hostname}': {error}")),
-                                        "DNSManagement".into(),
-                                    )
-                                    .await?;
-                            }
-                        }
-
-                        ingress_hostnames = dns_result.successful_hostnames;
-                    } else {
-                        // All DNS records failed - fall back to tunnel hostname
-                        error!(
-                            "Failed to create any DNS records for service '{svc_name}' - falling back to internal tunnel hostname"
-                        );
-                        ingress_hostnames.push(tunnel_hostname.clone());
-
-                        // Post events for all failed DNS records
-                        for (hostname, error) in &dns_result.failed_hostnames {
-                            ctx.events
-                                .publish(
-                                    &service.object_ref(&()),
-                                    kube::runtime::events::EventType::Warning,
-                                    "DNSRecordFailed".into(),
-                                    Some(format!("Failed to create DNS record for '{hostname}': {error}")),
-                                    "DNSManagement".into(),
-                                )
-                                .await?;
-                        }
-                    }
-                } else {
-                    info!("No DNS annotation found for service '{svc_name}' in External mode - using tunnel hostname");
-                    // No DNS annotation in external mode - use tunnel hostname
-                    ingress_hostnames.push(tunnel_hostname.clone());
-                }
-            }
-        }
-
-        let ingress: Vec<LoadBalancerIngress> = ingress_hostnames
-            .into_iter()
-            .map(|hostname| LoadBalancerIngress {
-                hostname: Some(hostname),
-                ..Default::default()
-            })
-            .collect();
-
-        let status = ServiceStatus {
-            load_balancer: Some(k8s_openapi::api::core::v1::LoadBalancerStatus { ingress: Some(ingress) }),
-            ..Default::default()
-        };
-
-        let new_status = Patch::Apply(json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "status": status
-        }));
-
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let ps = PatchParams::apply("tlb-controller").force();
-        svc_api.patch_status(&svc_name, &ps, &new_status).await?;
-
-        info!("Patched status for service `{svc_name}`");
-
-        Ok(())
-    }
-
-    async fn reconcile_service_quick_mode(
-        &self,
-        ctx: &ReconcileContext,
-        service: &Service,
-        owner_references: Vec<OwnerReference>,
-        _service_annotations: ServiceAnnotations,
-        ports: Vec<ServicePort>,
-        protocol_annotation: Option<&str>,
-    ) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-
-        info!("Using Cloudflare Quick tunnel mode for service '{svc_name}' - no API credentials required");
-
-        let resource_prefix = self
-            .resource_prefix
-            .clone()
-            .unwrap_or(DEFAULT_RESOURCE_PREFIX.to_string());
-
-        // For quick mode, we create a deployment that runs cloudflared with --url
-        // The tunnel URL will be extracted from the container logs
-        let deployment_name = format!("{resource_prefix}{svc_name}");
-        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-
-        // Generate the service URL for the quick tunnel
-        // For quick mode, we connect to the first port of the service
-        let service_url = if let Some(port) = ports.first() {
-            let protocol = determine_port_protocol(port, protocol_annotation);
-            format!("{}://{}.{}:{}", protocol, svc_name, svc_namespace, port.port)
-        } else {
-            return Err(Error::ConfigError(format!(
-                "Service '{svc_name}' has no ports defined - cannot create quick tunnel"
-            )));
-        };
-
-        let deployment = Deployment {
-            metadata: ObjectMeta {
-                name: Some(deployment_name.clone()),
-                namespace: Some(svc_namespace.clone()),
-                owner_references: Some(owner_references),
-                labels: Some(BTreeMap::from([
-                    (
-                        FOR_TUNNEL_CLASS_LABEL.to_string(),
-                        ctx.metadata.name.as_ref().unwrap().to_string(),
-                    ),
-                    (FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-                    (PROVIDER_LABEL.to_string(), "cloudflare".to_string()),
-                ])),
-                ..Default::default()
-            },
-            spec: Some(DeploymentSpec {
-                replicas: Some(1),
-                strategy: Some(DeploymentStrategy {
-                    type_: Some("RollingUpdate".to_string()),
-                    rolling_update: Some(RollingUpdateDeployment {
-                        max_surge: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(1)),
-                        max_unavailable: Some(k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::Int(0)),
-                    }),
-                }),
-                selector: LabelSelector {
-                    match_labels: Some(BTreeMap::from([("app".to_string(), deployment_name.clone())])),
-                    match_expressions: None,
-                },
-                template: PodTemplateSpec {
-                    metadata: Some(ObjectMeta {
-                        labels: Some(BTreeMap::from([
-                            ("app".to_string(), deployment_name.clone()),
-                            ("controller.tlb.io/tunnel-mode".to_string(), "quick".to_string()),
-                        ])),
-                        ..Default::default()
-                    }),
-                    spec: Some(PodSpec {
-                        affinity: crate::build_pod_affinity_for_service(service).map(|pod_affinity| {
-                            k8s_openapi::api::core::v1::Affinity {
-                                pod_affinity: Some(pod_affinity),
-                                ..Default::default()
-                            }
-                        }),
-                        containers: vec![Container {
-                            name: "cloudflared".to_string(),
-                            image: Some(self.image.clone().unwrap_or(DEFAULT_CLOUDFLARED_IMAGE.to_string())),
-                            args: Some(vec![
-                                "tunnel".to_string(),
-                                "--no-autoupdate".to_string(),
-                                "--url".to_string(),
-                                service_url,
-                            ]),
-                            ..Default::default()
-                        }],
-                        ..Default::default()
-                    }),
-                },
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        deployment_api
-            .patch(
-                &deployment_name,
-                &PatchParams::apply("tlb-controller"),
-                &Patch::Apply(&deployment),
-            )
-            .await?;
-
-        info!("Reconciled cloudflared deployment {deployment_name} for service {svc_name} in quick mode");
-
-        // Check if we already have the tunnel URL cached in service annotations
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let mut tunnel_url = service
-            .metadata
-            .annotations
-            .as_ref()
-            .and_then(|annotations| annotations.get(TUNNEL_URL_ANNOTATION))
-            .cloned();
-
-        // If not cached, try to extract it from pod logs
-        if tunnel_url.is_none() {
-            if let Ok(Some(url)) =
-                extract_tunnel_url_from_logs(ctx.client.clone(), &svc_namespace, &deployment_name).await
-            {
-                tunnel_url = Some(url.clone());
-
-                // Cache the tunnel URL in service annotations
-                let patch = json!({
-                    "metadata": {
-                        "annotations": {
-                            TUNNEL_URL_ANNOTATION: url
-                        }
-                    }
-                });
-
-                if let Err(e) = svc_api
-                    .patch(&svc_name, &PatchParams::apply("tlb-controller"), &Patch::Merge(&patch))
-                    .await
-                {
-                    error!("Failed to cache tunnel URL in service annotations: {e}");
-                }
-            }
-        }
-
-        // Use the tunnel URL if found, otherwise return empty list
-        let ingress_hostnames = if let Some(url) = tunnel_url {
-            // Extract hostname from URL (remove https:// prefix)
-            let hostname = url.strip_prefix("https://").unwrap_or(&url).to_string();
-            vec![hostname]
-        } else {
-            vec![]
-        };
-
-        let ingress: Vec<LoadBalancerIngress> = ingress_hostnames
-            .into_iter()
-            .map(|hostname| LoadBalancerIngress {
-                hostname: Some(hostname),
-                ..Default::default()
-            })
-            .collect();
-
-        let status = ServiceStatus {
-            load_balancer: Some(k8s_openapi::api::core::v1::LoadBalancerStatus { ingress: Some(ingress) }),
-            ..Default::default()
-        };
-
-        let new_status = Patch::Apply(json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "status": status
-        }));
-
-        let ps = PatchParams::apply("tlb-controller").force();
-        svc_api.patch_status(&svc_name, &ps, &new_status).await?;
-
-        info!("Patched status for service `{svc_name}` in quick mode");
-
-        Ok(())
-    }
-
-    async fn cleanup_service_api_mode(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
-
-        // Validate api_token_ref configuration first for API mode
-        let api_token_ref = self.api_token_ref.as_ref();
-        let account_id = self.account_id.as_ref();
-
-        if api_token_ref.is_none() || account_id.is_none() {
-            error!(
-                "Invalid Cloudflare configuration for service '{svc_name}': API mode requires api_token_ref and account_id"
-            );
-            return Err(Error::ConfigError(
-                "Invalid Cloudflare configuration: API mode requires api_token_ref and account_id".to_string(),
-            ));
-        }
-
-        let api_token_ref = api_token_ref.unwrap();
-        let account_id = account_id.unwrap();
-
-        if api_token_ref.name.is_empty() || api_token_ref.key.is_empty() {
-            error!(
-                "Invalid Cloudflare configuration for service '{}': api_token_ref name='{}' key='{}' cannot be empty",
-                svc_name, api_token_ref.name, api_token_ref.key
-            );
-            return Err(Error::ConfigError(
-                "Invalid Cloudflare configuration: api_token_ref name and key cannot be empty".to_string(),
-            ));
-        }
-
-        // Get API token for cleanup operations
-        let api_token = match crate::get_secret_value(&ctx.client, api_token_ref, &svc_namespace).await {
-            Ok(token) => Some(token),
-            Err(e) => {
-                error!("Failed to get API token secret '{api_token_ref:?}': {e}");
-                // Continue with Kubernetes resource cleanup even if API access fails
-                None
-            }
-        };
-
-        let cf_client_opt = api_token.as_ref().map(|token| CloudflareApi::new(token, account_id));
-
-        // Parse service annotations to potentially use in secret cleanup
-        let service_annotations =
-            ServiceAnnotations::from(service.metadata.annotations.as_ref().cloned().unwrap_or_default());
-
-        // Use label selectors to find resources instead of hardcoded names
-        // This ensures cleanup works even if resource_prefix changes
-        let label_selector = format!(
-            "{}={},{}={},{}={}",
-            crate::FOR_SERVICE_LABEL,
-            svc_name,
-            crate::FOR_TUNNEL_CLASS_LABEL,
-            tunnel_class_name,
-            crate::PROVIDER_LABEL,
-            "cloudflare"
-        );
-
-        // Clean up Secrets - need to handle finalizers properly
-        let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let secrets = secret_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to list Secrets for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        // Track if any critical cleanup operations failed (like tunnel deletion)
-        let mut critical_cleanup_errors: Vec<String> = Vec::new();
-
-        for secret in secrets {
-            let secret_name = secret.metadata.name.as_ref().unwrap();
-
-            // Check if this secret has tunnel credentials and clean up the tunnel first
-            if secret
-                .metadata
-                .finalizers
-                .as_ref()
-                .map(|f| f.contains(&FINALIZER_NAME.to_string()))
-                .unwrap_or(false)
-            {
-                let mut cleanup_successful = true;
-                let mut cleanup_errors = Vec::new();
-
-                // Only attempt cleanup if we have API access
-                if let Some(cf_client) = &cf_client_opt {
-                    info!("Cleaning up Cloudflare tunnel for secret `{secret_name}` before deletion");
-
-                    if let Some(tunnel_data) = &secret.data {
-                        if let Some(tunnel_id_bytes) = tunnel_data.get("tunnel-id") {
-                            if let Ok(tunnel_id) = String::from_utf8(tunnel_id_bytes.0.clone()) {
-                                let tunnel_hostname = format!("{tunnel_id}.cfargotunnel.com");
-
-                                // Clean up DNS records based on announce_type
-                                let announce_type =
-                                    self.announce_type.as_ref().unwrap_or(&CloudflareAnnounceType::External);
-
-                                match announce_type {
-                                    CloudflareAnnounceType::Internal => {
-                                        // Internal mode: no DNS records to clean up
-                                        info!(
-                                            "Internal announce mode for tunnel {tunnel_id} - no DNS records to clean up"
-                                        );
-                                    }
-                                    CloudflareAnnounceType::External => {
-                                        // External mode: clean up DNS records if service had DNS annotation
-                                        if let Some(dns_annotation) = &service_annotations.dns {
-                                            let dns_result = manage_dns_records(
-                                                cf_client,
-                                                dns_annotation,
-                                                &tunnel_hostname,
-                                                DnsOperation::Delete,
-                                            )
-                                            .await;
-
-                                            if dns_result.has_failures() {
-                                                let failed_hostnames: Vec<String> = dns_result
-                                                    .failed_hostnames
-                                                    .iter()
-                                                    .map(|(hostname, error)| format!("{hostname}: {error}"))
-                                                    .collect();
-                                                let error_msg = format!(
-                                                    "DNS record deletion failed: {}",
-                                                    failed_hostnames.join(", ")
-                                                );
-                                                error!(
-                                                    "Failed to delete some DNS records for tunnel {tunnel_id}: {error_msg}"
-                                                );
-                                                cleanup_errors.push(format!("DNS record deletion: {error_msg}"));
-                                                cleanup_successful = false;
-
-                                                // Post events for individual DNS deletion failures
-                                                for (hostname, error) in &dns_result.failed_hostnames {
-                                                    if let Err(e) = ctx
-                                                        .events
-                                                        .publish(
-                                                            &service.object_ref(&()),
-                                                            kube::runtime::events::EventType::Warning,
-                                                            "DNSRecordDeletionFailed".into(),
-                                                            Some(format!(
-                                                                "Failed to delete DNS record for '{hostname}': {error}"
-                                                            )),
-                                                            "DNSCleanup".into(),
-                                                        )
-                                                        .await
-                                                    {
-                                                        log::warn!("Failed to publish DNS deletion failure event: {e}");
-                                                    }
-                                                }
-                                            } else {
-                                                info!("Successfully deleted DNS records for tunnel {tunnel_id}");
-                                            }
-                                        } else {
-                                            info!(
-                                                "No DNS annotation found for tunnel {tunnel_id} - no DNS records to clean up"
-                                            );
-                                        }
-                                    }
-                                }
-
-                                // Delete the tunnel itself
-                                if let Err(e) = cf_client.delete_tunnel(&tunnel_id).await {
-                                    error!("Failed to delete Cloudflare tunnel {tunnel_id}: {e}");
-                                    cleanup_errors.push(format!("tunnel deletion: {e}"));
-                                    cleanup_successful = false;
-                                } else {
-                                    info!("Successfully deleted Cloudflare tunnel {tunnel_id}");
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // No API access - can't clean up tunnel, this should prevent finalizer removal
-                    cleanup_errors.push("no API access available for tunnel cleanup".to_string());
-                    cleanup_successful = false;
-                }
-
-                // Only remove finalizer if cleanup was completely successful
-                if cleanup_successful {
-                    // Remove the finalizer to allow secret deletion
-                    let mut finalizers = secret.metadata.finalizers.clone().unwrap_or_default();
-                    finalizers.retain(|f| f != FINALIZER_NAME);
-                    secret_api
-                        .patch(
-                            secret_name,
-                            &PatchParams::default(),
-                            &Patch::Merge(json!({
-                                "metadata": {
-                                    "finalizers": finalizers
-                                }
-                            })),
-                        )
-                        .await
-                        .map_err(|e| {
-                            Error::CloudflareError(format!(
-                                "Failed to remove finalizer from Secret '{secret_name}' for service '{svc_name}': {e}"
-                            ))
-                        })?;
-
-                    info!("Removed finalizer from cloudflare secret `{secret_name}` for service `{svc_name}`");
-                } else {
-                    // Create an event about the failure to clean up
-                    ctx.events
-                        .publish(
-                            &secret.object_ref(&()),
-                            kube::runtime::events::EventType::Warning,
-                            "CleanupFailed".into(),
-                            Some(format!(
-                                "Cannot remove finalizer from secret `{secret_name}`: cleanup failed ({})",
-                                cleanup_errors.join(", ")
-                            )),
-                            "Cleanup".into(),
-                        )
-                        .await?;
-
-                    error!(
-                        "Cleanup failed for secret `{secret_name}`, keeping finalizer in place: {}",
-                        cleanup_errors.join(", ")
-                    );
-                    // Track critical cleanup failure for service-level error handling
-                    critical_cleanup_errors
-                        .extend(cleanup_errors.iter().map(|e| format!("secret '{secret_name}': {e}")));
-                    continue; // Skip deletion attempt, secret will remain
-                }
-            }
-
-            info!("Deleting cloudflare secret `{secret_name}` for service `{svc_name}` using label selector");
-            secret_api.delete(secret_name, &Default::default()).await.map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to delete Secret '{secret_name}' for service '{svc_name}': {e}"
-                ))
-            })?;
-        }
-
-        // Clean up ConfigMaps
-        let configmap_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let configmaps = configmap_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to list ConfigMaps for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        for configmap in configmaps {
-            let configmap_name = configmap.metadata.name.as_ref().unwrap();
-            info!("Deleting cloudflare configmap `{configmap_name}` for service `{svc_name}` using label selector");
-            configmap_api
-                .delete(configmap_name, &Default::default())
-                .await
-                .map_err(|e| {
-                    Error::CloudflareError(format!(
-                        "Failed to delete ConfigMap '{configmap_name}' for service '{svc_name}': {e}"
-                    ))
-                })?;
-        }
-
-        // Clean up Deployments
-        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let deployments = deployment_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to list Deployments for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        for deployment in deployments {
-            let deployment_name = deployment.metadata.name.as_ref().unwrap();
-            info!("Deleting cloudflare deployment `{deployment_name}` for service `{svc_name}` using label selector");
-            deployment_api
-                .delete(deployment_name, &Default::default())
-                .await
-                .map_err(|e| {
-                    Error::CloudflareError(format!(
-                        "Failed to delete Deployment '{deployment_name}' for service '{svc_name}': {e}"
-                    ))
-                })?;
-        }
-
-        // Return error if any critical cleanup operations failed
-        if !critical_cleanup_errors.is_empty() {
-            return Err(Error::CloudflareError(format!(
-                "Critical cleanup operations failed for service '{}': {}",
-                svc_name,
-                critical_cleanup_errors.join(", ")
-            )));
-        }
-
-        Ok(())
-    }
-
-    async fn cleanup_service_quick_mode(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap_or_else(|| "default".to_string());
-        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
-
-        info!("Cleaning up Cloudflare Quick tunnel mode resources for service '{svc_name}'");
-
-        // Use label selectors to find resources
-        let label_selector = format!(
-            "{}={},{}={},{}={}",
-            crate::FOR_SERVICE_LABEL,
-            svc_name,
-            crate::FOR_TUNNEL_CLASS_LABEL,
-            tunnel_class_name,
-            crate::PROVIDER_LABEL,
-            "cloudflare"
-        );
-
-        // Clean up Deployments (no secrets or configmaps in quick mode)
-        let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let deployments = deployment_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to list Deployments for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        for deployment in deployments {
-            let deployment_name = deployment.metadata.name.as_ref().unwrap();
-            info!("Deleting cloudflare deployment `{deployment_name}` for service `{svc_name}` in quick mode");
-            deployment_api
-                .delete(deployment_name, &Default::default())
-                .await
-                .map_err(|e| {
-                    Error::CloudflareError(format!(
-                        "Failed to delete Deployment '{deployment_name}' for service '{svc_name}': {e}"
-                    ))
-                })?;
-        }
-
-        // Remove the TUNNEL_URL_ANNOTATION annotation from the service.
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &svc_namespace);
-        let patch = json!({
-            "metadata": {
-                "annotations": {
-                    TUNNEL_URL_ANNOTATION: null // Remove the annotation
-                }
-            }
-        });
-        let ps = PatchParams::default();
-        svc_api
-            .patch(&svc_name, &ps, &Patch::Merge(&patch))
-            .await
-            .map_err(|e| {
-                Error::CloudflareError(format!(
-                    "Failed to remove tunnel URL annotation from service '{svc_name}': {e}"
-                ))
-            })?;
-
-        info!("Successfully cleaned up Cloudflare Quick tunnel mode resources for service '{svc_name}'");
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{context, mock};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn server(responses: Vec<(&'static str, Value)>) -> (CloudflareApi, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut api = CloudflareApi::new("test-token", "account").unwrap();
+        api.base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move {
+            for (expected, result) in responses {
+                let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let byte = tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    bytes.push(byte);
+                    if bytes.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                    assert!(bytes.len() < 16384);
+                }
+                let request = String::from_utf8(bytes).unwrap();
+                assert!(request.lines().next().unwrap().starts_with(expected), "{request}");
+                let body = json!({"success":true,"result":result,"result_info":{"total_pages":1}}).to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+        (api, task)
+    }
 
     #[test]
-    fn test_cloudflare_config_tunnel_mode_detection() {
-        // Test that tunnel mode is automatically determined by presence of API credentials
-        let config_api_mode = CloudflareConfig {
-            api_token_ref: Some(crate::crds::SeretKeyRef {
-                name: "my-secret".to_string(),
-                namespace: Some("default".to_string()),
-                key: "token".to_string(),
-            }),
-            account_id: Some("test-account".to_string()),
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-        };
+    fn invalid_api_token_is_an_error_not_a_panic() {
+        assert!(CloudflareApi::new("token\nInjected: bad", "account").is_err());
+    }
 
-        let config_quick_mode = CloudflareConfig {
-            api_token_ref: None,
-            account_id: None,
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-        };
+    #[tokio::test]
+    async fn renamed_tunnel_uses_the_persisted_id() {
+        let (api, task) = server(vec![(
+            "GET /accounts/account/cfd_tunnel/saved-id ",
+            json!({"id":"saved-id", "name":"renamed", "config_src":"local"}),
+        )])
+        .await;
+        let (client, _) = mock(vec![]);
+        let ctx = context(client);
+        let mut binding = ctx.binding.clone();
+        binding.data.cloudflare.tunnel_name = Some("initial-name".into());
+        binding.data.cloudflare.tunnel_secret = Some("secret".into());
+        binding.data.cloudflare.tunnel_id = Some("saved-id".into());
+        assert_eq!(ensure_tunnel(&api, &ctx, &mut binding).await.unwrap(), "saved-id");
+        task.await.unwrap();
+    }
 
-        // Check that API mode is detected when both api_token_ref and account_id are present
-        assert!(config_api_mode.api_token_ref.is_some());
-        assert!(config_api_mode.account_id.is_some());
+    #[tokio::test]
+    async fn renamed_dns_record_is_deleted_by_id() {
+        let (api, task) = server(vec![
+            ("GET /zones/zone/dns_records?", json!([])),
+            (
+                "GET /zones/zone/dns_records/saved-id ",
+                json!({"id":"saved-id", "name":"renamed.example.com",
+                "content":"target", "type":"CNAME", "comment":"owner", "proxied":true, "ttl":1}),
+            ),
+            ("DELETE /zones/zone/dns_records/saved-id ", json!({"id":"saved-id"})),
+        ])
+        .await;
+        remove_dns(
+            &api,
+            &DnsIntent {
+                zone_id: "zone".into(),
+                hostname: "original.example.com".into(),
+                record_id: Some("saved-id".into()),
+            },
+            "owner",
+        )
+        .await
+        .unwrap();
+        task.await.unwrap();
+    }
 
-        // Check that Quick mode is detected when API credentials are absent
-        assert!(config_quick_mode.api_token_ref.is_none());
-        assert!(config_quick_mode.account_id.is_none());
+    #[tokio::test]
+    async fn zones_respect_the_api_page_limit() {
+        let (api, task) = server(vec![("GET /zones?page=1&per_page=50 ", json!([]))]).await;
+        assert!(api.list::<Zone>("/zones", &[]).await.unwrap().is_empty());
+        task.await.unwrap();
+    }
 
-        // Test partial credentials (should use Quick mode)
-        let config_partial_1 = CloudflareConfig {
-            api_token_ref: Some(crate::crds::SeretKeyRef {
-                name: "my-secret".to_string(),
-                namespace: Some("default".to_string()),
-                key: "token".to_string(),
-            }),
-            account_id: None, // Missing account_id
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-        };
+    #[tokio::test]
+    async fn failed_journal_save_recovers_created_tunnel_without_duplicate_creation() {
+        use crate::test_support::Exchange;
+        let response = json!([{ "id":"recovered", "name":"pending", "config_src":"local" }]);
+        let (api, task) = server(vec![
+            ("GET /accounts/account/cfd_tunnel?", response.clone()),
+            ("GET /accounts/account/cfd_tunnel?", response),
+        ])
+        .await;
+        let (client, requests) = mock(vec![
+            Exchange {
+                method: "PUT",
+                path: "/api/v1/namespaces/tlb-system/secrets/tlb-service-uid",
+                status: 500,
+                response: json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"InternalError","message":"injected failure","code":500}),
+                check: |_| {},
+            },
+            Exchange {
+                method: "PUT",
+                path: "/api/v1/namespaces/tlb-system/secrets/tlb-service-uid",
+                status: 200,
+                response: json!({"metadata":{"name":"tlb-service-uid","namespace":"tlb-system","uid":"binding-uid","resourceVersion":"2"}}),
+                check: |body| {
+                    assert!(body["data"]["binding.json"].is_string());
+                },
+            },
+        ]);
+        let ctx = context(client);
+        let mut persisted = ctx.binding.clone();
+        persisted.data.cloudflare.tunnel_name = Some("pending".into());
+        persisted.data.cloudflare.tunnel_secret = Some("persisted-secret".into());
+        let mut first_attempt = persisted.clone();
+        assert!(ensure_tunnel(&api, &ctx, &mut first_attempt).await.is_err());
+        assert_eq!(ensure_tunnel(&api, &ctx, &mut persisted).await.unwrap(), "recovered");
+        assert!(requests.lock().unwrap().is_empty());
+        task.await.unwrap();
+    }
 
-        let config_partial_2 = CloudflareConfig {
-            api_token_ref: None, // Missing api_token_ref
-            account_id: Some("test-account".to_string()),
-            image: None,
-            resource_prefix: None,
-            tunnel_prefix: None,
-            announce_type: None,
-        };
+    #[tokio::test]
+    async fn dns_proxy_drift_is_repaired_by_record_id() {
+        let (client, _) = mock(vec![]);
+        let ctx = context(client);
+        let mut binding = ctx.binding.clone();
+        binding.data.cloudflare.dns.push(DnsIntent {
+            zone_id: "zone".into(),
+            hostname: "app.example.com".into(),
+            record_id: Some("saved".into()),
+        });
+        let record = json!({"id":"saved","name":"app.example.com","content":"target","type":"CNAME", "comment":owner_marker(&binding).unwrap(),"proxied":false,"ttl":300});
+        let (api, task) = server(vec![
+            ("GET /zones/zone/dns_records?", json!([record.clone()])),
+            ("PUT /zones/zone/dns_records/saved ", record),
+        ])
+        .await;
+        reconcile_dns(&api, &ctx, &mut binding, &["app.example.com".into()].into(), "target")
+            .await
+            .unwrap();
+        task.await.unwrap();
+    }
 
-        // Both partial configurations should use Quick mode (not use_api_mode)
-        let use_api_mode_partial_1 = config_partial_1.api_token_ref.is_some() && config_partial_1.account_id.is_some();
-        let use_api_mode_partial_2 = config_partial_2.api_token_ref.is_some() && config_partial_2.account_id.is_some();
+    #[tokio::test]
+    async fn readiness_flap_retains_the_current_container_url_without_announcing_it() {
+        use crate::test_support::Exchange;
+        let pod = json!({"metadata":{"uid":"pod-uid","name":"pod"},"status":{
+            "conditions":[{"type":"Ready","status":"False"}],
+            "containerStatuses":[{"name":"cloudflared","image":"image","imageID":"id","ready":false,
+                "restartCount":0,"containerID":"container-1","state":{"running":{}}}]
+        }});
+        let (client, requests) = mock(vec![Exchange {
+            method: "GET",
+            path: "/api/v1/namespaces/apps/pods",
+            status: 200,
+            response: json!({"items":[pod]}),
+            check: |_| {},
+        }]);
+        let ctx = context(client);
+        let mut binding = ctx.binding.clone();
+        binding
+            .data
+            .cloudflare
+            .quick_urls
+            .insert("pod-uid:0:container-1".into(), "known.trycloudflare.com".into());
+        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().is_empty());
+        assert_eq!(binding.data.cloudflare.quick_urls.len(), 1);
+        assert!(requests.lock().unwrap().is_empty());
+    }
 
-        assert!(!use_api_mode_partial_1);
-        assert!(!use_api_mode_partial_2);
+    #[test]
+    fn quick_tunnel_identity_changes_on_container_restart_and_excludes_terminating_pods() {
+        let mut pod: Pod = serde_json::from_value(json!({"metadata":{"uid":"pod-uid"}, "status":{
+            "conditions":[{"type":"Ready", "status":"True"}],
+            "containerStatuses":[{"name":"cloudflared", "image":"image", "imageID":"image-id", "ready":true,
+                "restartCount":0,"containerID":"container-1","state":{"running":{}}}]
+        }}))
+        .unwrap();
+        let first = quick_identity(&pod).unwrap();
+        pod.status.as_mut().unwrap().container_statuses.as_mut().unwrap()[0].restart_count = 1;
+        assert_ne!(quick_identity(&pod).unwrap(), first);
+        pod.metadata.deletion_timestamp = Some(serde_json::from_value(json!("2026-09-13T00:00:00Z")).unwrap());
+        assert!(quick_identity(&pod).is_none());
     }
 }

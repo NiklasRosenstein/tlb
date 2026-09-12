@@ -1,3 +1,4 @@
+{{- if .Values.serviceAccount.create }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -11,6 +12,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+{{- end }}
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -26,12 +28,14 @@ rules:
     verbs:
       - get
       - list
+      - watch
   - apiGroups: [""]
     resources:
       - pods
     verbs:
       - get
       - list
+      - watch
   - apiGroups: [""]
     resources:
       - pods/log
@@ -43,7 +47,13 @@ rules:
     verbs:
       - get
       - list
+      - watch
       - patch # for annotations and finalizer
+  - apiGroups: [""]
+    resources:
+      - services/finalizers
+    verbs:
+      - update
   - apiGroups: [""]
     resources:
       - services/status
@@ -54,6 +64,8 @@ rules:
       - configmaps
       - secrets
     verbs:
+      - list
+      - watch
       - create
       - get
       - patch
@@ -62,8 +74,10 @@ rules:
     resources:
       - persistentvolumeclaims
     verbs:
+      - get
       - delete
       - list
+      - watch
   - apiGroups: ["events.k8s.io"]
     resources:
       - events
@@ -79,6 +93,7 @@ rules:
       - get
       - create
       - list
+      - watch
       - patch
   - apiGroups: ["tlb.io"]
     resources:
@@ -87,8 +102,8 @@ rules:
     verbs:
       - get
       - list
-      - patch
       - watch
+      - patch
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -101,6 +116,34 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ include "tlb-controller.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "tlb-controller.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "tlb-controller.fullname" . }}-journal
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["update"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "tlb-controller.fullname" . }}-journal
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "tlb-controller.fullname" . }}-journal
 subjects:
   - kind: ServiceAccount
     name: {{ include "tlb-controller.serviceAccountName" . }}

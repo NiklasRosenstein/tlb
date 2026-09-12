@@ -3,14 +3,18 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 use async_trait::async_trait;
 use k8s_openapi::api::core::v1::{Secret, Service};
-use kube::{Api, Client, runtime::controller::Action};
+use kube::{Api, Client};
 
 use crate::simpleevent::SimpleEventRecorder;
 
 pub mod cloudflare;
+pub mod config;
 pub mod crds;
+pub mod leadership;
+pub mod managed;
 pub mod netbird;
 pub mod simpleevent;
+pub mod state;
 
 pub const FOR_TUNNEL_CLASS_LABEL: &str = "controller.tlb.io/for-tunnel-class";
 pub const FOR_SERVICE_LABEL: &str = "controller.tlb.io/for-service";
@@ -22,39 +26,13 @@ pub struct ReconcileContext {
     pub events: SimpleEventRecorder,
     pub metadata: kube::api::ObjectMeta,
     pub namespaced: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ProviderType {
-    Cloudflare,
-    Netbird,
-}
-
-impl ProviderType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ProviderType::Cloudflare => "cloudflare",
-            ProviderType::Netbird => "netbird",
-        }
-    }
-}
-
-impl std::fmt::Display for ProviderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
+    pub binding: state::Binding,
 }
 
 #[async_trait]
 pub trait TunnelProvider {
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
     async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
-    fn provider_type(&self) -> ProviderType;
-
-    /// Legacy method for backward compatibility - delegates to provider_type()
-    fn name(&self) -> &'static str {
-        self.provider_type().as_str()
-    }
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -74,6 +52,9 @@ pub enum Error {
     #[error("Cloudflare Error: {0}")]
     CloudflareError(String),
 
+    #[error("cleanup is still in progress")]
+    CleanupPending,
+
     #[error("Configuration Error: {0}")]
     ConfigError(String),
 
@@ -82,15 +63,6 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
-
-#[async_trait::async_trait]
-pub trait Reconcile<C> {
-    /// Reconcile the current state with the desired state.
-    ///
-    /// This method should implement the logic to ensure that the current state of the resource
-    /// matches the desired state as defined in the spec.
-    async fn reconcile(&self, ctx: &C) -> Result<Action>;
-}
 
 /// Represents a single port mapping configuration
 #[derive(Debug, Clone, PartialEq)]
@@ -288,3 +260,6 @@ pub fn build_pod_affinity_for_service(service: &Service) -> Option<k8s_openapi::
         required_during_scheduling_ignored_during_execution: None,
     })
 }
+
+#[cfg(test)]
+mod test_support;

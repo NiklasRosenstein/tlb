@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, SocketAddr},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use k8s_openapi::{
@@ -7,30 +11,20 @@ use k8s_openapi::{
         core::v1::{
             Affinity, Capabilities, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
             LoadBalancerIngress, PersistentVolumeClaim, PersistentVolumeClaimSpec, Pod, PodSpec, PodTemplateSpec,
-            Secret, SecretKeySelector, SecurityContext, Service, ServicePort, ServiceStatus, Volume, VolumeMount,
+            Secret, SecretKeySelector, SecurityContext, Service, ServicePort, Volume, VolumeMount,
             VolumeResourceRequirements,
         },
     },
-    apimachinery::pkg::{
-        api::resource::Quantity,
-        apis::meta::v1::{LabelSelector, OwnerReference},
-    },
+    apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector},
 };
-use kube::{
-    Api, Resource, ResourceExt,
-    api::{ObjectMeta, Patch, PatchParams, PostParams},
-    core::Selector,
-    runtime::events::EventType,
-};
-use log::info;
-use serde_json::json;
+use kube::{Api, Resource, ResourceExt, api::ObjectMeta, core::Selector, runtime::events::EventType};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
     net::TcpStream,
 };
 
 use crate::{
-    Error, ReconcileContext, Result, ServiceAnnotations, TunnelProvider,
+    Error, ReconcileContext, Result, TunnelProvider,
     crds::{NetbirdAnnounceType, NetbirdConfig},
     simpleevent::SimpleEventRecorder,
 };
@@ -44,9 +38,13 @@ pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=wa
 fn resolve_port_mapping(mapping: &crate::PortMapping, ports: &[ServicePort]) -> Result<(i32, String)> {
     if let Ok(port_num) = mapping.service_port.parse::<i32>() {
         // Port specified by number - find matching port for protocol
-        let service_port = ports.iter().find(|p| p.port == port_num);
+        let service_port = ports
+            .iter()
+            .find(|p| p.port == port_num)
+            .ok_or_else(|| Error::ConfigError(format!("Port mapping references unknown service port '{port_num}'")))?;
         let protocol = service_port
-            .and_then(|p| p.protocol.as_ref())
+            .protocol
+            .as_ref()
             .unwrap_or(&"TCP".to_string())
             .to_lowercase();
         Ok((port_num, protocol))
@@ -91,10 +89,21 @@ fn get_netbird_launch_script(
     ports: &[ServicePort],
     port_mappings: Option<Vec<crate::PortMapping>>,
 ) -> Result<String> {
-    let mut launch_script = vec!["#!/bin/sh".to_string(), "set -e".to_string()];
+    let service_ip = match service_ip.parse::<IpAddr>() {
+        Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+        Ok(IpAddr::V4(ip)) => ip.to_string(),
+        Err(_) => return Err(Error::ConfigError("invalid Service ClusterIP".into())),
+    };
+    let mut launch_script = vec![
+        "#!/bin/sh".to_string(),
+        "set -e".to_string(),
+        "children=''".into(),
+        "trap 'trap - EXIT TERM INT; kill $children 2>/dev/null || true; sleep 1; kill -KILL $children 2>/dev/null || true; wait 2>/dev/null || true' EXIT".into(),
+        "trap 'exit 1' TERM INT".into(),
+    ];
 
     // Install socat if it's not already installed.
-    launch_script.push("if ! command socat >/dev/null 2>&1; then apk add --no-cache socat; fi".to_owned());
+    launch_script.push("if ! command -v socat >/dev/null 2>&1; then apk add --no-cache socat; fi".to_owned());
 
     if let Some(mappings) = port_mappings {
         // Use custom port mappings
@@ -122,7 +131,9 @@ fn get_netbird_launch_script(
                 format!("{protocol}:{service_ip}:{target_port}")
             };
 
-            launch_script.push(format!("socat {listen_spec} {target_spec} &"));
+            launch_script.push(format!(
+                "socat {listen_spec} {target_spec} &\nchildren=\"$children $!\""
+            ));
         }
     } else {
         // Default behavior: direct 1:1 port mapping without TLS
@@ -133,7 +144,7 @@ fn get_netbird_launch_script(
             // Regular socat forwarding without TLS
             launch_script.push(format!(
                 "socat {protocol}-listen:{port_num},fork,reuseaddr \
-                    {protocol}:{service_ip}:{port_num} &"
+                    {protocol}:{service_ip}:{port_num} &\nchildren=\"$children $!\""
             ));
         });
     }
@@ -141,7 +152,7 @@ fn get_netbird_launch_script(
     // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
     launch_script.push(format!(
         "( \
-            while ! ip addr show {netbird_iface} &>/dev/null; do \
+            while ! ip addr show {netbird_iface} >/dev/null 2>&1; do \
                 echo \"[peer-ip-server] Waiting for {netbird_iface} to come up...\"; \
                 sleep 1; \
             done; \
@@ -153,19 +164,19 @@ fn get_netbird_launch_script(
         ) &"
     ));
 
-    launch_script.push(up_command);
+    launch_script.push("children=\"$children $!\"".into());
+    launch_script.push(format!("( {up_command} ) &\nchildren=\"$children $!\""));
+    launch_script.push(
+        "while true; do for child in $children; do kill -0 \"$child\" 2>/dev/null || exit 1; done; sleep 1; done"
+            .into(),
+    );
     Ok(launch_script.join("\n"))
 }
 
 #[async_trait]
 impl TunnelProvider for NetbirdConfig {
-    fn provider_type(&self) -> crate::ProviderType {
-        crate::ProviderType::Netbird
-    }
-
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let options = ServiceAnnotations::from(service.metadata.annotations.clone().unwrap_or_default());
-        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
+        let options = crate::config::validate_service(service, &ctx.binding.data.class)?;
 
         let svc_name = service.metadata.name.as_ref().ok_or(Error::UnexpectedError(format!(
             "Service does not have a name: {service:?} (in netbird::reconcile_service at {}:{})",
@@ -198,43 +209,30 @@ impl TunnelProvider for NetbirdConfig {
                         Some("No ports defined.".to_string()),
                         "Reconcile".into(),
                     )
-                    .await?;
+                    .await;
                 Vec::new()
             }
         };
 
-        // We need to run in the same namespace that has the secret. If the namespace of the secret is
-        // not specified, we assume we're in a namespaced tunnel, so the secret and the service will
-        // be in the same namespace.
-        let resource_namespace = self.setup_key_ref.namespace.clone().unwrap_or(svc_namespace.clone());
-
-        // Only set owner references when the StatefulSet and Service are in the same namespace.
-        // This avoids OwnerRefInvalidNamespace errors when they're in different namespaces.
-        // Cleanup will still work through labels.
-        let owner_references = if resource_namespace == *svc_namespace {
-            vec![OwnerReference {
-                api_version: "v1".into(),
-                kind: "Service".into(),
-                name: service.name_any(),
-                uid: service.metadata.uid.clone().unwrap_or_default(),
-                controller: Some(false),
-                block_owner_deletion: Some(true),
-            }]
-        } else {
-            Vec::new()
-        };
-
+        let resource_namespace = svc_namespace.clone();
+        let owner_references = ctx.owner_references()?;
         let pod_api = Api::<Pod>::namespaced(ctx.client.clone(), &resource_namespace);
-        let svc_api = Api::<Service>::namespaced(ctx.client.clone(), svc_namespace);
-
-        // Labels to match on for the Deployment.
-        let match_labels = BTreeMap::from([
-            ("app.kubernetes.io/name".to_string(), "netbird".to_string()),
-            ("app.kubernetes.io/instance".to_string(), svc_name.to_string()),
-            (crate::FOR_SERVICE_LABEL.to_string(), svc_name.clone()),
-            (crate::FOR_TUNNEL_CLASS_LABEL.to_string(), tunnel_class_name.to_string()),
-            (crate::PROVIDER_LABEL.to_string(), "netbird".to_string()),
-        ]);
+        let match_labels = ctx.labels()?;
+        let credential_name = ctx.resource_name("nb-", "-key")?;
+        let credential = ctx
+            .binding
+            .data
+            .credentials
+            .get("setup-key")
+            .ok_or_else(|| Error::ConfigError("binding is missing its setup key".into()))?;
+        let credential_secret = Secret {
+            metadata: ctx.metadata(&credential_name)?,
+            data: Some(BTreeMap::from([(
+                "setup-key".into(),
+                k8s_openapi::ByteString(credential.as_bytes().to_vec()),
+            )])),
+            ..Default::default()
+        };
 
         let netbird_interface = self
             .netbird_interface
@@ -254,7 +252,7 @@ impl TunnelProvider for NetbirdConfig {
                             Some(format!("Invalid port mapping configuration: {err}")),
                             "Reconcile".into(),
                         )
-                        .await?;
+                        .await;
                     return Ok(());
                 }
             }
@@ -287,7 +285,7 @@ impl TunnelProvider for NetbirdConfig {
                         Some(err.to_string()),
                         "Reconcile".into(),
                     )
-                    .await?;
+                    .await;
                 return Ok(());
             }
         };
@@ -302,8 +300,8 @@ impl TunnelProvider for NetbirdConfig {
                 name: "NB_SETUP_KEY".into(),
                 value_from: Some(EnvVarSource {
                     secret_key_ref: Some(SecretKeySelector {
-                        name: self.setup_key_ref.name.clone(),
-                        key: self.setup_key_ref.key.clone(),
+                        name: credential_name.clone(),
+                        key: "setup-key".into(),
                         optional: Some(false),
                     }),
                     ..Default::default()
@@ -354,7 +352,7 @@ impl TunnelProvider for NetbirdConfig {
                     ),
                     "Reconcile".into(),
                 )
-                .await?;
+                .await;
             announce_type = NetbirdAnnounceType::IP;
         }
 
@@ -409,6 +407,7 @@ impl TunnelProvider for NetbirdConfig {
         }
 
         let pod_spec = PodSpec {
+            automount_service_account_token: Some(false),
             node_selector: Some(node_selector),
             affinity: Some(affinity),
             containers: vec![Container {
@@ -455,11 +454,8 @@ impl TunnelProvider for NetbirdConfig {
             spec: Some(pod_spec),
         };
 
-        let resource_name = format!(
-            "{}{}",
-            self.resource_prefix.clone().unwrap_or_else(|| "tunnel-".to_string()),
-            svc_name
-        );
+        let resource_name =
+            ctx.resource_name_with_limit(self.resource_prefix.as_deref().unwrap_or("tunnel-"), "", 52)?;
 
         let mut statefulset_spec = StatefulSetSpec {
             replicas: Some(options.replicas),
@@ -476,6 +472,8 @@ impl TunnelProvider for NetbirdConfig {
             let pvc = PersistentVolumeClaim {
                 metadata: ObjectMeta {
                     name: Some("netbird-data".into()),
+                    labels: Some(match_labels.clone()),
+                    owner_references: Some(owner_references.clone()),
                     ..Default::default()
                 },
                 spec: Some(PersistentVolumeClaimSpec {
@@ -511,7 +509,7 @@ impl TunnelProvider for NetbirdConfig {
         // Check if TLS is used in any port mappings to determine if TLS secret should be mounted
         let needs_tls_secret = port_mappings
             .as_ref()
-            .map(|mappings| mappings.iter().any(|m| m.listen_tls || m.service_tls))
+            .map(|mappings| mappings.iter().any(|m| m.listen_tls))
             .unwrap_or(false);
 
         // Add TLS secret volume and mount if TLS is used in port mappings
@@ -522,6 +520,7 @@ impl TunnelProvider for NetbirdConfig {
                 let secret_api = Api::<Secret>::namespaced(ctx.client.clone(), svc_namespace);
                 match secret_api.get_opt(tls_secret_name).await? {
                     Some(secret) => {
+                        crate::config::validate_tls_secret(&secret)?;
                         secret_resource_version = secret.metadata.resource_version.clone();
                     }
                     None => {
@@ -535,8 +534,10 @@ impl TunnelProvider for NetbirdConfig {
                                 )),
                                 "Reconcile".into(),
                             )
-                            .await?;
-                        return Ok(());
+                            .await;
+                        return Err(Error::ConfigError(format!(
+                            "TLS Secret {svc_namespace}/{tls_secret_name} is missing"
+                        )));
                     }
                 }
 
@@ -572,7 +573,7 @@ impl TunnelProvider for NetbirdConfig {
                         ),
                         "Reconcile".into(),
                     )
-                    .await?;
+                    .await;
                 return Ok(());
             }
         }
@@ -610,67 +611,34 @@ impl TunnelProvider for NetbirdConfig {
             ..Default::default()
         };
 
+        let credential_secret = crate::managed::apply(
+            ctx,
+            &Api::<Secret>::namespaced(ctx.client.clone(), svc_namespace),
+            &credential_secret,
+        )
+        .await?;
+        let mut statefulset = statefulset;
+        statefulset
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .metadata
+            .as_mut()
+            .unwrap()
+            .annotations
+            .get_or_insert_default()
+            .insert(
+                "controller.tlb.io/secret-version".into(),
+                credential_secret.resource_version().unwrap_or_default(),
+            );
         let statefulset_api = Api::<StatefulSet>::namespaced(ctx.client.clone(), &resource_namespace);
-        // Patch or create the statefulset.
-        match statefulset_api.get_opt(&resource_name).await? {
-            Some(_) => {
-                // It exists, so let's patch it.
-                match statefulset_api
-                    .patch(
-                        &resource_name,
-                        &PatchParams::apply("tlb-controller").force(),
-                        &Patch::Apply(&statefulset),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        info!("Patched statefulset for service `{svc_name}`");
-                    }
-                    Err(kube::Error::Api(e)) if e.code == 422 => {
-                        info!(
-                            "Patching StatefulSet '{resource_name}' failed, likely due to immutable field change. Deleting and recreating."
-                        );
-                        ctx.events
-                            .publish(
-                                &service.object_ref(&()),
-                                EventType::Warning,
-                                "StatefulSetRecreation".into(),
-                                Some(format!(
-                                    "Patch for StatefulSet '{resource_name}' failed. Deleting and recreating."
-                                )),
-                                "Reconcile".into(),
-                            )
-                            .await?;
-                        statefulset_api.delete(&resource_name, &Default::default()).await?;
-
-                        // Recreate the statefulset immediately.
-                        info!("Re-creating statefulset for service `{svc_name}` after deletion.");
-                        statefulset_api.create(&PostParams::default(), &statefulset).await?;
-                        info!("Re-created statefulset for service `{svc_name}`");
-                    }
-                    Err(e) => {
-                        return Err(e.into());
-                    }
-                }
-            }
-            None => {
-                // It does not exist, so create it.
-                statefulset_api.create(&PostParams::default(), &statefulset).await?;
-                info!("Created statefulset for service `{svc_name}`");
-            }
-        }
-
-        // Also need to delete the deployment if it exists from a previous version
-        use k8s_openapi::api::apps::v1::Deployment;
-        let deployment_api = Api::<Deployment>::namespaced(ctx.client.clone(), &resource_namespace);
-        if deployment_api.get_opt(&resource_name).await?.is_some() {
-            info!("Deleting deployment `{resource_name}` for service `{svc_name}` as it is now a statefulset");
-            deployment_api.delete(&resource_name, &Default::default()).await?;
-        }
+        // Invalid or immutable desired fields leave the running workload intact.
+        crate::managed::apply(ctx, &statefulset_api, &statefulset).await?;
 
         // Find all pods that match the resource's selector.
         let pods = pod_api
-            .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels.into_iter())))
+            .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels)))
             .await?;
         let pod_netbird_ips = get_pod_netbird_peer_ips(pods.items, &ctx.events).await?;
         let lb_ingress: Vec<LoadBalancerIngress> = match announce_type {
@@ -692,193 +660,91 @@ impl TunnelProvider for NetbirdConfig {
                 .unwrap_or_default(),
         };
 
-        let status = ServiceStatus {
-            load_balancer: Some(k8s_openapi::api::core::v1::LoadBalancerStatus {
-                ingress: Some(lb_ingress),
-            }),
-            ..Default::default()
-        };
-
-        let new_status = Patch::Apply(json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "status": status
-        }));
-
-        let ps = PatchParams::apply("tlb-controller").force();
-        svc_api.patch_status(svc_name, &ps, &new_status).await?;
-
-        info!("Patched status for service `{svc_name}`");
+        crate::managed::patch_ingress(ctx, service, lb_ingress).await?;
 
         Ok(())
     }
 
-    async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
-        let svc_name = service.name_any();
-        let svc_namespace = service.namespace().unwrap();
-        let tunnel_class_name = ctx.metadata.name.as_ref().unwrap();
-
-        // Use label selectors to find resources instead of hardcoded names
-        // This ensures cleanup works even if resource_prefix changes
-        let label_selector = format!(
-            "{}={},{}={},{}={}",
-            crate::FOR_SERVICE_LABEL,
-            svc_name,
-            crate::FOR_TUNNEL_CLASS_LABEL,
-            tunnel_class_name,
-            crate::PROVIDER_LABEL,
-            "netbird"
-        );
-
-        // Clean up StatefulSets
-        let statefulset_api = Api::<StatefulSet>::namespaced(ctx.client.clone(), &svc_namespace);
-        let statefulsets = statefulset_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::UnexpectedError(format!(
-                    "Failed to list StatefulSets for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        for statefulset in statefulsets {
-            let statefulset_name = statefulset.metadata.name.as_ref().unwrap();
-            info!("Deleting netbird statefulset `{statefulset_name}` for service `{svc_name}` using label selector");
-            statefulset_api
-                .delete(statefulset_name, &Default::default())
-                .await
-                .map_err(|e| {
-                    Error::UnexpectedError(format!(
-                        "Failed to delete StatefulSet '{statefulset_name}' for service '{svc_name}': {e}"
-                    ))
-                })?;
-        }
-
-        // Clean up PVCs created by the StatefulSets
-        // PVCs created by StatefulSets inherit the StatefulSet's selector labels
-        let pvc_api = Api::<PersistentVolumeClaim>::namespaced(ctx.client.clone(), &svc_namespace);
-        let pvcs = pvc_api
-            .list(&kube::api::ListParams::default().labels(&label_selector))
-            .await
-            .map_err(|e| {
-                Error::UnexpectedError(format!(
-                    "Failed to list PVCs for service '{svc_name}' in namespace '{svc_namespace}': {e}"
-                ))
-            })?;
-
-        for pvc in pvcs {
-            let pvc_name = pvc.metadata.name.as_ref().unwrap();
-            info!("Deleting PVC `{pvc_name}` for service `{svc_name}`");
-            pvc_api.delete(pvc_name, &Default::default()).await.map_err(|e| {
-                Error::UnexpectedError(format!(
-                    "Failed to delete PVC '{pvc_name}' for service '{svc_name}': {e}"
-                ))
-            })?;
-        }
-
-        Ok(())
+    async fn cleanup_service(&self, ctx: &ReconcileContext, _service: &Service) -> Result<()> {
+        crate::managed::cleanup_workloads(ctx).await?;
+        crate::managed::cleanup_storage(ctx).await
     }
 }
 
-/// Executes `ip addr show <netbird_interface>` on the pod's Netbird interface to get the Netbird peer IPs.
+/// Reads one bounded, newline-terminated IP address before the exchange deadline.
+async fn read_peer_ip<R: AsyncRead + Unpin>(stream: R, deadline: tokio::time::Instant) -> std::io::Result<IpAddr> {
+    tokio::time::timeout_at(deadline, async {
+        let mut reader = BufReader::new(stream.take(64));
+        let mut line = Vec::new();
+        reader.read_until(b'\n', &mut line).await?;
+        if line.last() != Some(&b'\n') || line.len() >= 64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "peer IP response must be a short complete line",
+            ));
+        }
+        std::str::from_utf8(&line)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "peer response is not an IP address"))
+    })
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "peer IP exchange timed out"))?
+}
+
+async fn query_peer_ip(pod_ip: IpAddr) -> std::io::Result<IpAddr> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let stream = tokio::time::timeout_at(
+        deadline,
+        TcpStream::connect(SocketAddr::new(pod_ip, NETBIRD_PEER_IP_PORT)),
+    )
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "peer IP connection timed out"))??;
+    read_peer_ip(stream, deadline).await
+}
+
 async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) -> Result<Vec<String>> {
     let mut peer_ips = Vec::new();
-
     for pod in pods {
-        let pod_name = pod
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| Error::UnexpectedError("Pod does not have a name".to_string()))?;
-
-        let pod_ready = pod
-            .status
-            .as_ref()
-            .map(|s| {
+        if pod.metadata.deletion_timestamp.is_some()
+            || !pod.status.as_ref().is_some_and(|s| {
                 s.conditions
                     .as_ref()
-                    .unwrap_or(&Vec::new())
-                    .iter()
-                    .any(|c| c.type_ == "Ready" && c.status == "True")
+                    .is_some_and(|cs| cs.iter().any(|c| c.type_ == "Ready" && c.status == "True"))
             })
-            .unwrap_or(false);
-        if !pod_ready {
-            events
-                .publish(
-                    &pod.object_ref(&()),
-                    EventType::Warning,
-                    "PodNotReady".into(),
-                    Some(format!("Pod `{pod_name}` is not ready")),
-                    "Reconcile".into(),
-                )
-                .await?;
+        {
             continue;
-        };
-
-        let pod_ip = pod
+        }
+        let Some(pod_ip) = pod
             .status
             .as_ref()
-            .and_then(|s| s.pod_ip.clone())
-            .ok_or_else(|| Error::UnexpectedError(format!("Pod `{pod_name}` does not have an IP")))?;
-
-        // Attempt to connect to the Netbird peer IP server on the pod's IP and port.
-        info!(
-            "[peer-ip-server] Attempting to connect to Netbird peer IP server on pod `{pod_name}` at {pod_ip}:{NETBIRD_PEER_IP_PORT}"
-        );
-        let mut stream = match tokio::time::timeout(
-            Duration::from_secs(5),
-            TcpStream::connect(format!("{pod_ip}:{NETBIRD_PEER_IP_PORT}",)),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => stream,
-            e => {
-                events
+            .and_then(|s| s.pod_ip.as_ref())
+            .and_then(|s| s.parse::<IpAddr>().ok())
+        else {
+            continue;
+        };
+        match query_peer_ip(pod_ip).await {
+            Ok(ip) => peer_ips.push(ip.to_string()),
+            Err(err) => {
+                log::warn!(
+                    "peer IP discovery failed for {}/{}: {err}",
+                    pod.namespace().unwrap_or_default(),
+                    pod.name_any()
+                );
+                let _ = events
                     .publish(
                         &pod.object_ref(&()),
                         EventType::Warning,
-                        "PeerIPServerConnectionFailed".into(),
-                        Some(format!(
-                            "Failed to connect to Netbird peer IP server on pod `{pod_name}`: {e:?}"
-                        )),
+                        "PeerIPDiscoveryFailed".into(),
+                        Some(err.to_string()),
                         "Reconcile".into(),
                     )
-                    .await?;
-                continue;
+                    .await;
             }
-        };
-
-        info!(
-            "[peer-ip-server] Connected to Netbird peer IP server on pod `{pod_name}` at {pod_ip}:{NETBIRD_PEER_IP_PORT}"
-        );
-        // Read a single line from the stream to get the Netbird peer IP.
-        let mut reader = BufReader::new(&mut stream);
-        let mut response_line = String::new();
-        reader.read_line(&mut response_line).await?;
-
-        // Trim the response line and check if it's empty.
-        let response_line = response_line.trim().to_string();
-        if response_line.is_empty() {
-            events
-                .publish(
-                    &pod.object_ref(&()),
-                    EventType::Warning,
-                    "PeerIPServerEmptyResponse".into(),
-                    Some(format!(
-                        "Received empty response from Netbird peer IP server on pod `{pod_name}`"
-                    )),
-                    "Reconcile".into(),
-                )
-                .await?;
-            continue;
         }
-
-        eprintln!("[peer-ip-server] peer IP server on pod `{pod_name}` is `{response_line}`");
-
-        peer_ips.push(response_line);
     }
-
-    eprintln!("[peer-ip-server] Found {} Netbird peer IPs", peer_ips.len());
+    peer_ips.sort();
+    peer_ips.dedup();
     Ok(peer_ips)
 }
 
@@ -886,6 +752,77 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
 mod tests {
     use super::*;
     use k8s_openapi::api::core::v1::ServicePort;
+
+    #[test]
+    fn failed_forwarder_terminates_the_supervisor() {
+        use std::process::{Command, Stdio};
+        let script = get_netbird_launch_script(
+            "10.0.0.1".into(),
+            "api".into(),
+            "apps".into(),
+            "eth0".into(),
+            "wt0".into(),
+            "exec sleep 30".into(),
+            &[ServicePort {
+                port: 80,
+                ..Default::default()
+            }],
+            None,
+        )
+        .unwrap();
+        let script = format!("socat() {{ return 1; }}\nip() {{ return 1; }}\n{script}");
+        let mut child = Command::new("sh")
+            .args(["-c", &script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(!status.success());
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("failed forwarder left supervisor alive: {script}");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_ip_frames_are_bounded_and_validated() {
+        for (input, expected) in [
+            ("100.64.1.2\n", Some("100.64.1.2")),
+            ("2001:db8::1\n", Some("2001:db8::1")),
+            ("\n", None),
+            ("not-an-ip\n", None),
+            ("100.64.1.2", None),
+        ] {
+            let result = read_peer_ip(input.as_bytes(), tokio::time::Instant::now() + Duration::from_secs(1)).await;
+            assert_eq!(result.ok().map(|ip| ip.to_string()).as_deref(), expected);
+        }
+        let oversized = vec![b'1'; 1024];
+        assert!(
+            read_peer_ip(
+                oversized.as_slice(),
+                tokio::time::Instant::now() + Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_cannot_exceed_deadline() {
+        let (_writer, reader) = tokio::io::duplex(128);
+        let error = read_peer_ip(reader, tokio::time::Instant::now() + Duration::from_millis(10))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn test_port_mapping_parsing() {

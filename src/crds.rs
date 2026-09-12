@@ -44,7 +44,7 @@ pub struct CloudflareConfig {
     pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
     pub image: Option<String>,
-    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+    /// Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
     pub resource_prefix: Option<String>,
     /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
     pub tunnel_prefix: Option<String>,
@@ -100,7 +100,7 @@ pub struct NetbirdConfig {
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
     /// [`NetbirdAnnounceType::IP`].
     pub announce_type: Option<NetbirdAnnounceType>,
-    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+    /// Prefix for NetBird Kubernetes resources. Immutable while a Service is bound. Defaults to `tunnel-`.
     pub resource_prefix: Option<String>,
     /// The storage class to use for the persistent volume claim. If this is not set, an emptyDir
     /// will be used.
@@ -127,7 +127,7 @@ pub enum NetbirdAnnounceType {
 
 ///
 /// Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
-/// otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+/// a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
 ///
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]

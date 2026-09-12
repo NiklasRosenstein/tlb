@@ -11,17 +11,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  MISE_EXPERIMENTAL: true
+permissions:
+  contents: read
 
 jobs:
   ci:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: jdx/mise-action@v2
-      - run: mise install
-      # Workaround as sometimes the component would not get installed by mise ..?
-      - run: rustup component add --toolchain 1.87.0-x86_64-unknown-linux-gnu rustfmt clippy
+      - uses: actions/checkout@v7.0.1
+      - uses: jdx/mise-action@v4.3.0
       - run: mise run ci
+
+  kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: jdx/mise-action@v4.3.0
+      - run: mise install kind@0.33.0 helm@4.2.4
+      - run: mise exec kind@0.33.0 helm@4.2.4 -- bash tests/kubernetes.sh

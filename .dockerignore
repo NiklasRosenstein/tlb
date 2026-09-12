@@ -1,0 +1,6 @@
+.git
+/target
+
+/docs/node_modules
+/docs/dist
+/docs/.astro
