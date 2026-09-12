@@ -1,6 +1,9 @@
 name: Quick Tunnel E2E
 
 on:
+  pull_request:
+  push:
+    branches: ["develop"]
   workflow_dispatch:
 
 permissions:

@@ -64,7 +64,8 @@ The public HTTP retry budget defaults to 240 seconds. Use `mise run e2e-quick-tu
 `--tunnel-timeout`, `--node-image`, and `--origin-image` options. Commands and the overall scenario also have deadlines.
 The HTTP assertion runs in Rust with certificate verification enabled; no external curl process is required.
 
-The **Quick Tunnel E2E** GitHub Actions workflow runs manually. It exercises a live external provider, whose
+The **Quick Tunnel E2E** GitHub Actions workflow runs on every pull request and every push to `develop`, including
+merges. Manual runs are also available. It exercises a live external provider, whose
 [Quick Tunnel service has no uptime guarantee](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/).
 It complements the isolated lifecycle tests and can fail because of provider, DNS, or registry availability.
 
