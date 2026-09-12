@@ -1,0 +1,43 @@
+:root {
+  --sl-color-accent-low: #082f2b;
+  --sl-color-accent: #209b8f;
+  --sl-color-accent-high: #a2e9dd;
+  --sl-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --sl-content-width: 49rem;
+  --sl-sidebar-width: 17rem;
+}
+:root[data-theme='light'] {
+  --sl-color-accent-low: #dcf5ef;
+  --sl-color-accent: #087469;
+  --sl-color-accent-high: #104d45;
+}
+.site-title {
+  font-weight: 750;
+  letter-spacing: -0.045em;
+}
+h1,
+h2,
+h3 {
+  letter-spacing: -0.025em;
+}
+.hero h1 {
+  max-width: 13ch;
+}
+.hero .tagline {
+  max-width: 38rem;
+}
+.sl-markdown-content table {
+  font-size: 0.9rem;
+}
+.sl-markdown-content :is(th, td) {
+  vertical-align: top;
+}
+.card {
+  border-radius: 0.65rem;
+}
+.sl-link-button {
+  border-radius: 0.45rem;
+}
+.hero {
+  padding-block: clamp(2rem, 5vw, 4.5rem);
+}

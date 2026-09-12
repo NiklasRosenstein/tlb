@@ -1,0 +1,37 @@
+---
+title: Kubernetes Services. Reachable through tunnels.
+description: TLB connects Kubernetes Services to Cloudflare Tunnel and NetBird, with configuration that lives in your cluster.
+template: splash
+hero:
+  tagline: Give a Service a tunnel class. TLB runs the tunnel, publishes its address, and manages its lifecycle alongside your workload.
+  actions:
+    - text: Create your first tunnel
+      link: /tlb/start/quickstart/
+      icon: right-arrow
+    - text: Read the introduction
+      link: /tlb/start/introduction/
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+<CardGrid>
+  <Card title="Configure a Service" icon="setting">
+    Keep your application's Deployment and Service. Select a provider with `loadBalancerClass` and configure the tunnel with annotations.
+  </Card>
+  <Card title="Choose your network" icon="earth">
+    Use Cloudflare for published application endpoints, or NetBird to reach TCP and UDP services through your private peer network.
+  </Card>
+  <Card title="Keep configuration in Kubernetes" icon="document">
+    Tunnel classes hold provider settings. Secrets hold credentials. The Service's load balancer status tells you where to connect.
+  </Card>
+</CardGrid>
+
+## Start small. Find the details when you need them.
+
+<CardGrid>
+  <LinkCard title="Install TLB" description="Deploy the controller with Helm." href="/tlb/start/installation/" />
+  <LinkCard title="Cloudflare Tunnel" description="Connect your domain to an application." href="/tlb/guides/cloudflare/" />
+  <LinkCard title="NetBird" description="Expose services inside your peer network." href="/tlb/guides/netbird/" />
+  <LinkCard title="Configuration reference" description="Class fields, annotations, and defaults." href="/tlb/reference/classes/" />
+</CardGrid>
