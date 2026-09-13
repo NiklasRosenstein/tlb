@@ -1114,6 +1114,84 @@ mod tests {
         assert!(requests.lock().unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn quick_tunnel_refreshes_restarted_and_replaced_pods_and_prunes_stale_urls() {
+        use crate::test_support::Exchange;
+        for (uid, restarts, container) in [("pod-uid", 1, "container-2"), ("new-pod", 0, "container-3")] {
+            let pod = json!({"metadata":{"uid":uid,"name":"pod"},"status":{
+                "conditions":[{"type":"Ready","status":"True"}],
+                "containerStatuses":[{"name":"cloudflared","image":"image","imageID":"id","ready":true,
+                    "restartCount":restarts,"containerID":container,"state":{"running":{}}}]
+            }});
+            let (client, requests) = mock(vec![
+                Exchange {
+                    method: "GET",
+                    path: "/api/v1/namespaces/apps/pods",
+                    status: 200,
+                    response: json!({"items":[pod.clone()]}),
+                    check: |_| {},
+                },
+                Exchange {
+                    method: "GET",
+                    path: "/api/v1/namespaces/apps/pods/pod/log",
+                    status: 200,
+                    response: json!("INF | https://fresh.trycloudflare.com |"),
+                    check: |_| {},
+                },
+                Exchange {
+                    method: "PUT",
+                    path: "/api/v1/namespaces/tlb-system/secrets/tlb-service-uid",
+                    status: 200,
+                    response: json!({"metadata":{"name":"tlb-service-uid","namespace":"tlb-system",
+                        "uid":"12345678-1234-1234-1234-123456789012","resourceVersion":"2"}}),
+                    check: |body| {
+                        let bytes: ByteString = serde_json::from_value(body["data"]["binding.json"].clone()).unwrap();
+                        let data: crate::state::BindingData = serde_json::from_slice(&bytes.0).unwrap();
+                        assert_eq!(data.cloudflare.quick_urls.len(), 1);
+                        assert!(!data.cloudflare.quick_urls.contains_key("pod-uid:0:container-1"));
+                        assert_eq!(
+                            data.cloudflare.quick_urls.values().next().unwrap(),
+                            "fresh.trycloudflare.com"
+                        );
+                    },
+                },
+                Exchange {
+                    method: "GET",
+                    path: "/api/v1/namespaces/apps/pods",
+                    status: 200,
+                    response: json!({"items":[pod]}),
+                    check: |_| {},
+                },
+            ]);
+            let ctx = context(client);
+            let mut binding = ctx.binding.clone();
+            binding
+                .data
+                .cloudflare
+                .quick_urls
+                .insert("pod-uid:0:container-1".into(), "stale.trycloudflare.com".into());
+            binding
+                .data
+                .cloudflare
+                .quick_urls
+                .insert("deleted-pod:0:gone".into(), "gone.trycloudflare.com".into());
+            assert_eq!(
+                quick_hostnames(&ctx, &mut binding).await.unwrap(),
+                vec!["fresh.trycloudflare.com"]
+            );
+            assert_eq!(
+                binding.data.cloudflare.quick_urls[&format!("{uid}:{restarts}:{container}")],
+                "fresh.trycloudflare.com"
+            );
+            binding.data = serde_json::from_slice(&serde_json::to_vec(&binding.data).unwrap()).unwrap();
+            assert_eq!(
+                quick_hostnames(&ctx, &mut binding).await.unwrap(),
+                vec!["fresh.trycloudflare.com"]
+            );
+            assert!(requests.lock().unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn quick_tunnel_identity_changes_on_container_restart_and_excludes_terminating_pods() {
         let mut pod: Pod = serde_json::from_value(json!({"metadata":{"uid":"pod-uid"}, "status":{
