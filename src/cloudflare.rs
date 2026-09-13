@@ -517,9 +517,6 @@ async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Resul
             }
             continue;
         }
-        if !ready {
-            continue;
-        }
         let logs = api
             .logs(
                 &pod.name_any(),
@@ -535,7 +532,9 @@ async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Resul
             Ok(logs) => {
                 if let Some(hostname) = logs.lines().find_map(extract_url_from_log_line) {
                     current.insert(identity, hostname.clone());
-                    announced.push(hostname);
+                    if ready {
+                        announced.push(hostname);
+                    }
                 }
             }
             Err(err) => log::warn!("cannot discover quick tunnel for {namespace}/{}: {err}", pod.name_any()),
@@ -1053,6 +1052,65 @@ mod tests {
             .insert("pod-uid:0:container-1".into(), "known.trycloudflare.com".into());
         assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().is_empty());
         assert_eq!(binding.data.cloudflare.quick_urls.len(), 1);
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unready_connector_persists_hostname_before_logs_rotate() {
+        use crate::test_support::Exchange;
+        let mut pod = json!({"metadata":{"uid":"pod-uid","name":"pod"},"status":{
+            "conditions":[{"type":"Ready","status":"False"}],
+            "containerStatuses":[{"name":"cloudflared","image":"image","imageID":"id","ready":false,
+                "restartCount":0,"containerID":"container-1","state":{"running":{}}}]
+        }});
+        let initial = json!({"items":[pod.clone()]});
+        pod["status"]["conditions"][0]["status"] = json!("True");
+        let (client, requests) = mock(vec![
+            Exchange {
+                method: "GET",
+                path: "/api/v1/namespaces/apps/pods",
+                status: 200,
+                response: initial,
+                check: |_| {},
+            },
+            Exchange {
+                method: "GET",
+                path: "/api/v1/namespaces/apps/pods/pod/log",
+                status: 200,
+                response: json!("INF | https://early.trycloudflare.com |"),
+                check: |_| {},
+            },
+            Exchange {
+                method: "PUT",
+                path: "/api/v1/namespaces/tlb-system/secrets/tlb-service-uid",
+                status: 200,
+                response: json!({"metadata":{"name":"tlb-service-uid","namespace":"tlb-system","uid":"12345678-1234-1234-1234-123456789012","resourceVersion":"2"}}),
+                check: |body| {
+                    let bytes: ByteString = serde_json::from_value(body["data"]["binding.json"].clone()).unwrap();
+                    let data: crate::state::BindingData = serde_json::from_slice(&bytes.0).unwrap();
+                    assert_eq!(
+                        data.cloudflare.quick_urls["pod-uid:0:container-1"],
+                        "early.trycloudflare.com"
+                    );
+                },
+            },
+            // No log request is allowed after readiness: the original line is no longer available.
+            Exchange {
+                method: "GET",
+                path: "/api/v1/namespaces/apps/pods",
+                status: 200,
+                response: json!({"items":[pod]}),
+                check: |_| {},
+            },
+        ]);
+        let ctx = context(client);
+        let mut binding = ctx.binding.clone();
+        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().is_empty());
+        binding.data = serde_json::from_slice(&serde_json::to_vec(&binding.data).unwrap()).unwrap();
+        assert_eq!(
+            quick_hostnames(&ctx, &mut binding).await.unwrap(),
+            vec!["early.trycloudflare.com"]
+        );
         assert!(requests.lock().unwrap().is_empty());
     }
 

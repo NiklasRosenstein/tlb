@@ -36,7 +36,16 @@ pub fn mock(exchanges: Vec<Exchange>) -> (Client, Arc<Mutex<VecDeque<Exchange>>>
             Ok::<_, std::io::Error>(
                 http::Response::builder()
                     .status(expected.status)
-                    .body(Body::from(serde_json::to_vec(&expected.response).unwrap()))
+                    .body(Body::from(if expected.path.ends_with("/log") {
+                        expected
+                            .response
+                            .as_str()
+                            .expect("log response must be text")
+                            .as_bytes()
+                            .to_vec()
+                    } else {
+                        serde_json::to_vec(&expected.response).unwrap()
+                    }))
                     .unwrap(),
             )
         }

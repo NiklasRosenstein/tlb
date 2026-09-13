@@ -16,6 +16,8 @@ Deno.test("release preserves dependency versions and input files", () => {
   const prepared = prepareRelease(files, "0.7.0");
   assert(prepared.get("Cargo.lock")!.includes('name = "dep"\nversion = "1.2.3"'));
   assert(prepared.get("Cargo.lock")!.includes('name = "tlb"\nversion = "0.7.0"'));
+  assert(prepared.get("helm/tlb-controller/Chart.yaml") === 'version: "0.7.0"\nappVersion: "0.7.0"\n');
+  assert(prepared.get("helm/tlb-controller/values.yaml") === 'image:\n  tag: "0.7.0"\n');
   assert(files.get("Cargo.toml")!.includes('version = "0.6.5"'));
 });
 Deno.test("invalid, repeated, missing and inconsistent versions fail before writes", async () => {

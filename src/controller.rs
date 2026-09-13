@@ -271,23 +271,24 @@ async fn cleanup(mut binding: Binding, data: &Data) -> Result<Action> {
     }
     managed::patch_ingress(&ctx, &binding.data.service, Vec::new()).await?;
     data.bindings.write().unwrap().remove(&uid);
-    // Provider progress can update the journal's resource version during cleanup.
-    let fresh = data.journals().get(&binding.secret.name_any()).await?;
-    let fresh = managed::set_finalizer(&data.journals(), &fresh, JOURNAL_FINALIZER, false).await?;
-    managed::delete(&data.journals(), &fresh).await?;
-    if data.journals().get_opt(&fresh.name_any()).await?.is_some() {
-        return Err(Error::CleanupPending);
-    }
     let namespace = binding
         .data
         .service
         .namespace()
         .ok_or_else(|| Error::ConfigError("journal Service namespace missing".into()))?;
     let api: Api<Service> = Api::namespaced(data.client.clone(), &namespace);
+    // Remove the Service finalizer before its journal so interrupted cleanup remains recoverable.
     if let Some(service) = api.get_opt(&binding.data.service.name_any()).await?
         && service.uid().as_deref() == Some(&uid)
     {
         managed::set_finalizer(&api, &service, SERVICE_FINALIZER, false).await?;
+    }
+    // Provider progress can update the journal's resource version during cleanup.
+    let fresh = data.journals().get(&binding.secret.name_any()).await?;
+    let fresh = managed::set_finalizer(&data.journals(), &fresh, JOURNAL_FINALIZER, false).await?;
+    managed::delete(&data.journals(), &fresh).await?;
+    if data.journals().get_opt(&fresh.name_any()).await?.is_some() {
+        return Err(Error::CleanupPending);
     }
     Ok(Action::requeue(Duration::from_secs(1)))
 }
@@ -366,13 +367,12 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
             validate_workload_inputs(&service, &class, data).await?;
             ensure_no_legacy(&service, data).await?;
             ensure_class_finalizer(&mut class, data).await?;
-            let service = managed::set_finalizer(&api, &service, SERVICE_FINALIZER, true).await?;
             let credentials = credentials(&service, &class, data).await?;
             Binding::create(
                 data.client.clone(),
                 &data.namespace,
                 BindingData {
-                    service,
+                    service: service.clone(),
                     class,
                     credentials,
                     cleaning: false,
@@ -382,6 +382,8 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
             .await?
         }
     };
+    // Persist the binding before adding the Service finalizer so missing journals identify legacy state.
+    managed::set_finalizer(&api, &service, SERVICE_FINALIZER, true).await?;
     // A class deletion that races journal creation must see the journal or prevent provisioning.
     let current_class = resolve(&service, data).await?;
     if current_class
@@ -414,56 +416,45 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
 }
 
 async fn ensure_no_legacy(service: &Service, data: &Data) -> Result<()> {
-    let selector = ListParams::default().labels(&format!("{}={}", tlb::FOR_SERVICE_LABEL, service.name_any()));
-    let mut metadata = Vec::new();
-    metadata.extend(
-        Api::<Deployment>::all(data.client.clone())
-            .list(&selector)
-            .await?
-            .items
-            .into_iter()
-            .map(|r| r.metadata),
-    );
-    metadata.extend(
-        Api::<StatefulSet>::all(data.client.clone())
-            .list(&selector)
-            .await?
-            .items
-            .into_iter()
-            .map(|r| r.metadata),
-    );
-    metadata.extend(
-        Api::<Secret>::all(data.client.clone())
-            .list(&selector)
-            .await?
-            .items
-            .into_iter()
-            .map(|r| r.metadata),
-    );
-    for object in metadata {
-        if object
+    if service.finalizers().iter().any(|f| f == SERVICE_FINALIZER) {
+        return Err(Error::ConfigError(
+            "Service has a tunnel finalizer but no private binding journal; recover its external state before proceeding".into(),
+        ));
+    }
+    let namespace = service
+        .namespace()
+        .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+    let selector = ListParams::default();
+    let deployments = Api::<Deployment>::namespaced(data.client.clone(), &namespace)
+        .list(&selector)
+        .await?;
+    let statefulsets = Api::<StatefulSet>::namespaced(data.client.clone(), &namespace)
+        .list(&selector)
+        .await?;
+    let secrets = Api::<Secret>::namespaced(data.client.clone(), &namespace)
+        .list(&selector)
+        .await?;
+    for object in deployments
+        .items
+        .into_iter()
+        .map(|r| r.metadata)
+        .chain(statefulsets.items.into_iter().map(|r| r.metadata))
+        .chain(secrets.items.into_iter().map(|r| r.metadata))
+    {
+        if object.owner_references.as_ref().is_some_and(|refs| {
+            refs.iter().any(|owner| {
+                owner.api_version == "v1"
+                    && owner.kind == "Service"
+                    && Some(&owner.uid) == service.metadata.uid.as_ref()
+            })
+        }) && object
             .labels
             .as_ref()
-            .is_some_and(|l| l.contains_key(tlb::state::BINDING_LABEL))
+            .is_some_and(|labels| labels.get(tlb::FOR_TUNNEL_CLASS_LABEL).map(String::as_str) == class_name(service))
         {
-            continue;
-        }
-        let owned = object.owner_references.as_ref().is_some_and(|rs| {
-            rs.iter()
-                .any(|r| Some(&r.uid) == service.metadata.uid.as_ref() && r.kind == "Service")
-        });
-        let class_matches = object
-            .labels
-            .as_ref()
-            .and_then(|l| l.get(tlb::FOR_TUNNEL_CLASS_LABEL))
-            .map(String::as_str)
-            == class_name(service);
-        if owned || class_matches {
-            return Err(Error::ConfigError(format!(
-                "resource {}/{} has no private binding journal; recover its ownership and external state before provisioning or deleting this Service",
-                object.namespace.as_deref().unwrap_or_default(),
-                object.name.as_deref().unwrap_or_default()
-            )));
+            return Err(Error::ConfigError(
+                "Service owns tunnel resources without a private binding journal; explicit recovery is required".into(),
+            ));
         }
     }
     Ok(())
@@ -504,30 +495,29 @@ async fn class_cleanup(class: &ClassSnapshot, data: &Data) -> Result<bool> {
             binding.save(data.client.clone()).await?;
         }
     }
-    // Name labels cannot prove ownership; do not delete ambiguous resources during class finalization.
-    let selector = ListParams::default().labels(&format!(
-        "{}={}",
-        tlb::FOR_TUNNEL_CLASS_LABEL,
-        class.metadata.name.as_deref().unwrap_or_default()
-    ));
-    let deployments = Api::<Deployment>::all(data.client.clone()).list(&selector).await?;
-    let statefulsets = Api::<StatefulSet>::all(data.client.clone()).list(&selector).await?;
-    let secrets = Api::<Secret>::all(data.client.clone()).list(&selector).await?;
-    if deployments
-        .items
-        .into_iter()
-        .map(|r| r.metadata)
-        .chain(statefulsets.items.into_iter().map(|r| r.metadata))
-        .chain(secrets.items.into_iter().map(|r| r.metadata))
-        .any(|m| {
-            !m.labels
-                .as_ref()
-                .is_some_and(|l| l.contains_key(tlb::state::BINDING_LABEL))
-        })
-    {
-        return Err(Error::ConfigError(
-            "class has resources without verifiable UID ownership; explicit recovery is required".into(),
-        ));
+    // Only Services actually selecting this class can require legacy recovery.
+    let services = if class.namespaced {
+        Api::<Service>::namespaced(
+            data.client.clone(),
+            class
+                .metadata
+                .namespace
+                .as_deref()
+                .ok_or_else(|| Error::ConfigError("class namespace missing".into()))?,
+        )
+    } else {
+        Api::<Service>::all(data.client.clone())
+    };
+    for service in services.list(&ListParams::default()).await? {
+        if class_name(&service) == class.metadata.name.as_deref()
+            && service.finalizers().iter().any(|f| f == SERVICE_FINALIZER)
+            && resolve(&service, data)
+                .await?
+                .is_some_and(|selected| selected.metadata.uid == class.metadata.uid)
+            && data.journals().get_opt(&Binding::name(&service)?).await?.is_none()
+        {
+            return Err(Error::ConfigError("class has a Service with a tunnel finalizer but no private binding journal; explicit recovery is required".into()));
+        }
     }
     Ok(!pending)
 }

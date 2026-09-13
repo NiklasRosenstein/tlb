@@ -55,10 +55,10 @@ def patch(kind, name, namespace, body):
     kubectl('patch', kind, name, '-n', namespace, '--type=merge', '-p', json.dumps(body))
 
 
-def service(namespace, name='api', finalizers=None, annotations=None):
+def service(namespace, name='api', finalizers=None, annotations=None, class_name='audit-public'):
     obj = dict(apiVersion='v1', kind='Service', metadata=dict(name=name, namespace=namespace,
                annotations={'tlb.io/replicas': '0', **(annotations or {})}, finalizers=finalizers or []),
-               spec=dict(type='LoadBalancer', loadBalancerClass='tlb.io/audit-public', ports=[dict(port=80)]))
+               spec=dict(type='LoadBalancer', loadBalancerClass='tlb.io/' + class_name, ports=[dict(port=80)]))
     kubectl('apply', '-f', '-', obj=obj)
 
 
@@ -70,12 +70,37 @@ netbird = dict(netbird=dict(managementUrl='https://netbird.example.com',
                setupKeyRef=dict(name='audit-key', key='key', namespace='tlb-system'), storageClass='standard'))
 apply('ClusterTunnelClass', 'audit-public', netbird)
 apply('TunnelClass', 'audit-public', dict(cloudflare={}), a)
+# Unrelated name labels in another namespace cannot veto lifecycle operations.
+spoof = dict(apiVersion='v1', kind='Secret', metadata=dict(name='unrelated-labels', namespace=b,
+    labels={'controller.tlb.io/for-tunnel-class': 'audit-public', 'controller.tlb.io/for-service': 'api'}))
+kubectl('apply', '-f', '-', obj=spoof)
 service(a, finalizers=['other.example/keep'])
 service(b)
 label = 'controller.tlb.io/binding-uid'
 a_deploy = wait(lambda: get('deployments', a, label), 'namespaced class wins over cluster class')[0]
 b_sts = wait(lambda: get('statefulsets', b, label), 'cluster class provisions in Service namespace')[0]
 assert not get('statefulsets', a, label)
+
+# A journal written before the Service finalizer must allow reconciliation to resume.
+patch('services', 'api', a, {'metadata': {'finalizers': ['other.example/keep']}})
+wait(lambda: 'tlb.io/tunnel-cleanup' in get('services', a)[0]['metadata'].get('finalizers', []),
+     'persisted journal restores a missing Service finalizer')
+
+# A legacy finalizer without a journal requires explicit recovery, even without visible workloads.
+apply('TunnelClass', 'legacy', dict(cloudflare={}), b)
+wait(lambda: any(c['metadata']['name'] == 'legacy' and 'tlb.io/finalizer' in c['metadata'].get('finalizers', [])
+     for c in get('tunnelclasses', b)), 'legacy test class is finalized')
+service(b, 'legacy', finalizers=['tlb.io/tunnel-cleanup'], class_name='legacy')
+legacy_service = next(s for s in get('services', b) if s['metadata']['name'] == 'legacy')
+time.sleep(3)
+assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + legacy_service['metadata']['uid'])
+kubectl('delete', 'tunnelclass', 'legacy', '-n', b, '--wait=false')
+time.sleep(3)
+assert any(c['metadata']['name'] == 'legacy' for c in get('tunnelclasses', b))
+patch('services', 'legacy', b, {'metadata': {'finalizers': []}})
+kubectl('delete', 'service', 'legacy', '-n', b, '--wait=false')
+wait(lambda: not any(c['metadata']['name'] == 'legacy' for c in get('tunnelclasses', b)),
+     'explicit legacy recovery releases class finalization')
 assert not get('deployments', b, label)
 assert a_deploy['metadata']['labels'][label] != b_sts['metadata']['labels'][label]
 assert not get('statefulsets', 'tlb-system', label)
@@ -128,7 +153,8 @@ patch('clustertunnelclass', 'audit-public', b, {'spec': {'netbird': {'size': Non
 
 kubectl('delete', 'tunnelclass', 'audit-public', '-n', a, '--wait=false')
 wait(lambda: not get('deployments', a, label), 'class deletion cleans only its own workloads')
-wait(lambda: not get('tunnelclasses', a), 'class finalizer waits for binding cleanup')
+wait(lambda: not get('tunnelclasses', a), 'foreign labels do not block class finalization')
+assert any(secret['metadata']['name'] == 'unrelated-labels' for secret in get('secrets', b))
 assert get('statefulsets', b, label)[0]['metadata']['uid'] == uid
 # Removing a local class intentionally exposes the cluster class for this Service.
 wait(lambda: get('statefulsets', a, label), 'Service rebinds to remaining cluster class')
