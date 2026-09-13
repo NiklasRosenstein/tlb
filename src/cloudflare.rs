@@ -554,14 +554,7 @@ impl TunnelProvider for CloudflareConfig {
         let namespace = service
             .namespace()
             .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
-        let port = service
-            .spec
-            .as_ref()
-            .and_then(|s| s.ports.as_ref())
-            .and_then(|p| p.first())
-            .ok_or_else(|| Error::ConfigError("Service has no port".into()))?;
-        let protocol = determine_port_protocol(port, service.annotations().get("tlb.io/protocol").map(String::as_str));
-        let origin = format!("{protocol}://{}.{}.svc:{}", service.name_any(), namespace, port.port);
+        let origin = service_origin(service)?;
         let mut binding = ctx.binding.clone();
         let resource_name = ctx.resource_name(self.resource_prefix.as_deref().unwrap_or("cf-"), "")?;
         let mut volumes = Vec::new();
@@ -805,38 +798,66 @@ const WELL_KNOWN_PORTS: &[(u16, &str)] = &[
     (8443, "https"), // Common HTTPS alternate
 ];
 
-/// Determines the protocol for a given service port based on annotations, port name, and well-known ports
-pub(crate) fn determine_port_protocol(port: &ServicePort, protocol_annotation: Option<&str>) -> String {
-    // 1. Check explicit protocol annotation first
-    if let Some(annotation) = protocol_annotation {
-        // Handle port-specific annotations like "80:http,22:ssh"
-        for mapping in annotation.split(',') {
-            let mapping = mapping.trim();
-            if let Some((port_spec, protocol)) = mapping.split_once(':') {
-                let port_spec = port_spec.trim();
-                let protocol = protocol.trim();
-
-                // Match by port number
-                if port_spec.parse::<u16>().map(|p| p == port.port as u16).unwrap_or(false) {
-                    return protocol.to_string();
-                }
-
-                // Match by port name
-                if let Some(port_name) = &port.name
-                    && port_spec == port_name
-                {
-                    return protocol.to_string();
-                }
-            }
-        }
-
-        // If no port-specific mapping found, check if it's a single protocol for all ports
-        if !annotation.contains(':') {
-            return annotation.to_string();
-        }
+/// Resolves the single origin shared by all hostnames on this tunnel.
+pub(crate) fn service_origin(service: &Service) -> Result<String> {
+    if service.annotations().contains_key("tlb.io/protocol") {
+        return Err(Error::ConfigError(
+            "use tlb.io/map-ports with protocol:service-port instead of tlb.io/protocol".into(),
+        ));
     }
+    let ports = service
+        .spec
+        .as_ref()
+        .and_then(|s| s.ports.as_ref())
+        .ok_or_else(|| Error::ConfigError("Service has no ports".into()))?;
+    let (protocol, port) = if let Some(mapping) = service.annotations().get("tlb.io/map-ports") {
+        if mapping.contains(',') {
+            return Err(Error::ConfigError(
+                "Cloudflare accepts one port mapping: multiple origins require hostname or path routing selectors"
+                    .into(),
+            ));
+        }
+        let (protocol, target) = mapping
+            .trim()
+            .split_once(':')
+            .ok_or_else(|| Error::ConfigError("Cloudflare port mapping must be protocol:service-port".into()))?;
+        let protocol = protocol.trim();
+        let target = target.trim();
+        let port = ports
+            .iter()
+            .find(|p| p.port.to_string() == target || p.name.as_deref() == Some(target))
+            .ok_or_else(|| Error::ConfigError("port mapping must reference a Service port".into()))?;
+        (protocol.to_string(), port)
+    } else {
+        if ports.len() != 1 {
+            return Err(Error::ConfigError(
+                "Cloudflare requires tlb.io/map-ports to select one origin from a multiport Service".into(),
+            ));
+        }
+        (determine_port_protocol(&ports[0]), &ports[0])
+    };
+    if !matches!(protocol.as_str(), "http" | "https" | "tcp" | "ssh" | "rdp" | "smb") {
+        return Err(Error::ConfigError("Cloudflare mapping protocol must be http, https, tcp, ssh, rdp, or smb; numeric listeners and TLS suffixes are not supported".into()));
+    }
+    if port.protocol.as_deref().unwrap_or("TCP") != "TCP" {
+        return Err(Error::ConfigError(
+            "Cloudflare origin must use a TCP Service port".into(),
+        ));
+    }
+    let namespace = service
+        .namespace()
+        .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+    Ok(format!(
+        "{protocol}://{}.{}.svc:{}",
+        service.name_any(),
+        namespace,
+        port.port
+    ))
+}
 
-    // 2. Check port name for protocol hints
+/// Infers the origin protocol from the Service port name or number.
+fn determine_port_protocol(port: &ServicePort) -> String {
+    // Check port name for protocol hints
     if let Some(port_name) = &port.name {
         let name_lower = port_name.to_lowercase();
         if name_lower.contains("http") && !name_lower.contains("https") {
@@ -853,14 +874,14 @@ pub(crate) fn determine_port_protocol(port: &ServicePort, protocol_annotation: O
         }
     }
 
-    // 3. Check well-known ports
+    // Check well-known ports
     for &(well_known_port, protocol) in WELL_KNOWN_PORTS {
         if port.port as u16 == well_known_port {
             return protocol.to_string();
         }
     }
 
-    // 4. Fallback to TCP/UDP based on port protocol
+    // Fallback to the transport protocol
     match port.protocol.as_deref().unwrap_or("TCP").to_uppercase().as_str() {
         "UDP" => "udp".to_string(),
         _ => "tcp".to_string(),

@@ -4,11 +4,12 @@ use k8s_openapi::api::{
     core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Secret, Service},
 };
 use kube::{
-    Api, ResourceExt,
+    Api, Resource, ResourceExt,
     api::ListParams,
     runtime::{
         Controller,
         controller::{Action, Config},
+        events::EventType,
         reflector::{ObjectRef, Store},
         watcher,
     },
@@ -299,9 +300,27 @@ async fn service_reconcile(service: Arc<Service>, data: Arc<Data>) -> Result<Act
     }
     let uid = required_uid(&service.metadata)?.to_string();
     let _guard = data.lock(&uid).await;
-    tokio::time::timeout(Duration::from_secs(120), reconcile_service(&service, &data))
+    let result = tokio::time::timeout(Duration::from_secs(120), reconcile_service(&service, &data))
         .await
-        .map_err(|_| Error::UnexpectedError("Service reconciliation exceeded 120 seconds".into()))?
+        .unwrap_or_else(|_| {
+            Err(Error::UnexpectedError(
+                "Service reconciliation exceeded 120 seconds".into(),
+            ))
+        });
+    if let Err(error) = &result
+        && !matches!(error, Error::CleanupPending)
+    {
+        data.events
+            .publish(
+                &service.object_ref(&()),
+                EventType::Warning,
+                "ReconcileFailed".into(),
+                Some(error.to_string()),
+                "Reconcile".into(),
+            )
+            .await;
+    }
+    result
 }
 
 async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
@@ -826,6 +845,92 @@ async fn health_server(ready: Arc<AtomicBool>) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn service_validation_errors_publish_events_and_survive_event_api_failure() {
+        use kube::client::Body;
+        for event_status in [201, 403] {
+            let service: Service = serde_json::from_value(json!({
+                "metadata":{"name":"api","namespace":"apps","uid":"service-uid",
+                    "annotations":{"tlb.io/map-ports":"https:80,ssh:22"}},
+                "spec":{"type":"LoadBalancer","loadBalancerClass":"tlb.io/public",
+                    "clusterIP":"10.0.0.1","ports":[{"port":80}]}
+            }))
+            .unwrap();
+            let snapshot = service.clone();
+            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let requests = calls.clone();
+            let client = kube::Client::new(
+                tower::service_fn(move |request: http::Request<Body>| {
+                    let service = snapshot.clone();
+                    let calls = calls.clone();
+                    async move {
+                        let path = request.uri().path().to_string();
+                        calls.lock().unwrap().push(path.clone());
+                        let (status, response) = match path.as_str() {
+                            "/api/v1/namespaces/apps/services/api" => (200, serde_json::to_value(service).unwrap()),
+                            "/api/v1/namespaces/tlb-system/secrets/tlb-service-uid" => (
+                                404,
+                                json!({"kind":"Status","status":"Failure","reason":"NotFound","code":404}),
+                            ),
+                            "/apis/tlb.io/v1alpha1/namespaces/apps/tunnelclasses/public" => (
+                                200,
+                                json!({
+                                    "metadata":{"name":"public","namespace":"apps","uid":"class-uid"},"spec":{"cloudflare":{}}
+                                }),
+                            ),
+                            "/apis/events.k8s.io/v1/namespaces/apps/events" => {
+                                assert_eq!(request.method(), "POST");
+                                let bytes = request.into_body().collect_bytes().await.unwrap();
+                                let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                                assert_eq!(event["type"], "Warning");
+                                assert_eq!(event["reason"], "ReconcileFailed");
+                                assert_eq!(event["action"], "Reconcile");
+                                assert_eq!(event["regarding"]["kind"], "Service");
+                                assert_eq!(event["regarding"]["name"], "api");
+                                assert_eq!(event["regarding"]["namespace"], "apps");
+                                assert_eq!(event["regarding"]["uid"], "service-uid");
+                                assert!(
+                                    event["note"]
+                                        .as_str()
+                                        .unwrap()
+                                        .contains("Cloudflare accepts one port mapping")
+                                );
+                                (
+                                    event_status,
+                                    if event_status == 201 {
+                                        event
+                                    } else {
+                                        json!({"kind":"Status","status":"Failure","reason":"Forbidden","code":403})
+                                    },
+                                )
+                            }
+                            _ => panic!("unexpected API request: {path}"),
+                        };
+                        Ok::<_, std::io::Error>(
+                            http::Response::builder()
+                                .status(status)
+                                .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                                .unwrap(),
+                        )
+                    }
+                }),
+                "default",
+            );
+            let data = Arc::new(Data {
+                events: SimpleEventRecorder::from_client(client.clone(), "test"),
+                client,
+                namespace: "tlb-system".into(),
+                locks: Default::default(),
+                bindings: Default::default(),
+                failures: Default::default(),
+            });
+            let error = service_reconcile(Arc::new(service), data).await.unwrap_err();
+            assert!(matches!(error, Error::ConfigError(_)));
+            assert!(error.to_string().contains("Cloudflare accepts one port mapping"));
+            assert_eq!(requests.lock().unwrap().len(), 4);
+        }
+    }
 
     fn class() -> ClassSnapshot {
         serde_json::from_value(

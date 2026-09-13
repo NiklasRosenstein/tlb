@@ -34,7 +34,7 @@ same name, the class in the Service's namespace takes precedence.
 | Publish an application on your domain              | Cloudflare API tunnel   | Your Cloudflare-managed hostname                 |
 | Reach TCP or UDP services on a private network     | NetBird                 | The peer IP or NetBird DNS name                  |
 
-Cloudflare tunnels accept **one TCP Service port** in TLB. HTTP and HTTPS applications are the simplest way to start;
+Cloudflare tunnels route to **one TCP Service port** in TLB. HTTP and HTTPS applications are the simplest way to start;
 non-HTTP origins also require the appropriate Cloudflare client configuration. NetBird supports multiple TCP/UDP ports
 and optional TLS forwarding.
 

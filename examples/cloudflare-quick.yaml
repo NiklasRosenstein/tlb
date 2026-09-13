@@ -13,7 +13,7 @@ kind: Service
 metadata:
   name: nginx-hello-world-quick
   annotations:
-    tlb.io/protocol: "http"
+    tlb.io/map-ports: "http:80"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/cloudflare-quick

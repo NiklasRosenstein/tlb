@@ -107,6 +107,15 @@ assert not get('statefulsets', 'tlb-system', label)
 assert get('secrets', b, label)[0]['data']['setup-key'] == 'dGVzdC1vbmx5LW5vdC1hLXByb3ZpZGVyLWtleQ=='
 print('PASS namespace isolation and central credential copy', flush=True)
 
+service(a, 'invalid-mapping', annotations={'tlb.io/map-ports': 'https:80,ssh:22'})
+invalid_service = next(s for s in get('services', a) if s['metadata']['name'] == 'invalid-mapping')
+wait(lambda: any(e.get('regarding', {}).get('uid') == invalid_service['metadata']['uid']
+     and e.get('type') == 'Warning' and e.get('reason') == 'ReconcileFailed'
+     and 'Cloudflare accepts one port mapping' in e.get('note', '')
+     for e in get('events.events.k8s.io', a)), 'invalid mapping produces a Warning Event on the Service')
+assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + invalid_service['metadata']['uid'])
+kubectl('delete', 'service', 'invalid-mapping', '-n', a, '--wait=false')
+
 apply('Secret', 'invalid-tls', namespace=b, stringData={'tls.crt': 'incomplete'})
 service(b, 'invalid-tls', annotations={'tlb.io/map-ports': '443/tls:80', 'tlb.io/tls-secret-name': 'invalid-tls'})
 time.sleep(3)

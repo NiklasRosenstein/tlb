@@ -54,7 +54,7 @@ metadata:
   namespace: apps
   annotations:
     tlb.io/dns: website.example.com
-    tlb.io/protocol: http
+    tlb.io/map-ports: "http:80"
     tlb.io/replicas: "2"
 spec:
   type: LoadBalancer
@@ -80,13 +80,18 @@ Service port**.
 
 ## Protocols and origin routing
 
-TLB accepts `http`, `https`, `tcp`, `ssh`, `rdp`, and `smb` as origin protocols. The Kubernetes Service must expose
-exactly one TCP port. UDP and multiport Services are rejected for this provider.
+TLB accepts `http`, `https`, `tcp`, `ssh`, `rdp`, and `smb` as origin protocols. Use `tlb.io/map-ports`
+to select one TCP Service port by name or number, for example `"https:8080"` or `"ssh:admin"`. Without a mapping, the
+Service must have exactly one TCP port and TLB infers its origin protocol.
 
-Set `tlb.io/protocol` explicitly when possible. `https` describes TLS between the connector and your application; it is
+Set `tlb.io/map-ports` explicitly when possible. `https` describes TLS between the connector and your application; it is
 separate from the public HTTPS URL. For non-HTTP applications, follow Cloudflare's
 [supported-protocol guidance](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/protocols/)
 for the required client-side connection method. A DNS name alone does not create a generic public TCP listener.
+
+TLB accepts one Cloudflare mapping per Service. All hostnames reach that origin. Multiple origins require hostname or
+path routing selectors, which `map-ports` does not supply; use separate LoadBalancer Services to expose them. Numeric
+listeners and NetBird TLS suffixes are not accepted for Cloudflare.
 
 ## DNS ownership and announcement
 
@@ -107,4 +112,4 @@ The [class reference](../../reference/classes/#cloudflare-fields) lists images, 
 `transportProtocol` selects the connection from cloudflared to Cloudflare: `auto` (default), `quic`, or `http2`. Set
 `spec.cloudflare.transportProtocol: http2` when outbound UDP is blocked or automatic fallback does not establish a
 connection. The tunnel needs outbound connectivity to Cloudflare on port 7844. This setting is independent of the origin
-protocol selected by `tlb.io/protocol`.
+protocol selected by `tlb.io/map-ports`.
