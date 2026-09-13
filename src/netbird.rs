@@ -149,14 +149,13 @@ fn get_netbird_launch_script(
         });
     }
 
-    // Launch a process in the background that waits for the Netbird interface to come up and expose it via a TCP server.
+    // Wait for an IPv4 address before exposing it; interface creation precedes address assignment.
     launch_script.push(format!(
         "( \
-            while ! ip addr show {netbird_iface} >/dev/null 2>&1; do \
+            while peer_ip=$(ip -4 addr show {netbird_iface} 2>/dev/null | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1 | head -n1); [ -z \"$peer_ip\" ]; do \
                 echo \"[peer-ip-server] Waiting for {netbird_iface} to come up...\"; \
                 sleep 1; \
             done; \
-            peer_ip=$(ip addr show {netbird_iface} | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1); \
             echo \"[peer-ip-server] {netbird_iface} is up with ip $peer_ip, serving on port {NETBIRD_PEER_IP_PORT}...\"; \
             while true; do \
                 echo \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \

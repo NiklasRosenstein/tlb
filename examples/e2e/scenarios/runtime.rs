@@ -159,10 +159,19 @@ pub async fn run(k: &Kubernetes) -> Result<()> {
         k.delete("Secret", app, "source-key").await?;
         k.delete("Secret", app, "other-tls").await?;
         wait("source loss reported", 90, async || {
-            Ok(k.list("Event", app, "").await?.iter().any(|e| {
-                let note = e["note"].as_str().unwrap_or_default();
-                note.contains("cannot read credential") || (note.contains("other-tls") && note.contains("not found"))
-            }))
+            // Event series retain their first note; logs identify the current failure.
+            let mut source_error = false;
+            for pod in k.list("Pod", SYSTEM, CONTROLLER).await? {
+                source_error |= k.logs(SYSTEM, name(&pod), "tlb-controller").await?.lines().any(|line| {
+                    line.contains(uid(&service))
+                        && (line.contains("cannot read credential")
+                            || (line.contains("other-tls") && line.contains("not found")))
+                });
+            }
+            Ok(source_error
+                && k.list("Event", app, "").await?.iter().any(|e| {
+                    e["regarding"]["uid"] == uid(&service) && e["type"] == "Warning" && e["reason"] == "ReconcileFailed"
+                }))
         })
         .await?;
         ensure!(

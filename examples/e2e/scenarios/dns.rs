@@ -118,7 +118,8 @@ pub async fn run(c: &Cluster, image: &str) -> Result<()> {
         json!({"stringData":{"key":"test-setup-key","token":"test-api-token"}}),
     ))
     .await?;
-    let up = r#"peer_name=$(hostname); ip link add wt0 type dummy; ip addr add "100.64.0.$(( ${peer_name##*-} + 10 ))/32" dev wt0; ip link set wt0 up; exec sleep infinity"#;
+    // Keep the interface unaddressed long enough to exercise peer-IP startup ordering.
+    let up = r#"peer_name=$(hostname); ip link add wt0 type dummy; sleep 3; ip addr add "100.64.0.$(( ${peer_name##*-} + 10 ))/32" dev wt0; ip link set wt0 up; exec sleep infinity"#;
     k.apply(object("TunnelClass",NS,"dns-audit",json!({"spec":{"netbird":{"managementUrl":format!("http://dns-api.{NS}.svc:8080"),"setupKeyRef":{"name":"credentials","key":"key"},"image":image,"enableEbpfCapabilities":false,"storageClass":"standard","upCommand":up,"customDns":{"zoneId":"zone","apiTokenRef":{"name":"credentials","key":"token"},"ttl":60}}}}))).await?;
     k.service(
         NS,
