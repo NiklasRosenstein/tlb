@@ -99,6 +99,17 @@ Service status. Clients must be able to resolve that NetBird name; it is not aut
 Use `tlb.io/topology-key` to prefer spreading replicas across a node or zone, and `tlb.io/node-selector` to restrict
 their placement. More replicas also require enough reusable setup-key uses and storage capacity.
 
+## Pod DNS resolution
+
+The default launch command includes `--disable-dns`, so NetBird leaves the Pod's Kubernetes resolver configuration
+intact. Forwarding uses the Service ClusterIP; the connector does not need to resolve NetBird peer names. Other peers
+can still resolve the connector's advertised DNS labels.
+
+A custom `spec.netbird.upCommand` must include `--disable-dns` to preserve cluster DNS. If the connector itself needs
+NetBird DNS, use `--disable-dns=false` and configure NetBird nameservers to resolve your cluster domains as well.
+NetBird persists this setting in peer state, so enabling DNS management requires the explicit `false` value.
+See [NetBird DNS settings](https://docs.netbird.io/manage/dns/dns-settings).
+
 ## Pod requirements
 
 NetBird Pods require network capabilities, including `NET_ADMIN`. The class enables `SYS_ADMIN` and `SYS_RESOURCE` for

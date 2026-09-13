@@ -48,7 +48,7 @@ These fields belong under `spec.netbird`.
 | `image`                  | string              | `netbirdio/netbird:latest`             | Peer image with the required forwarding tools                                          |
 | `netbirdInterface`       | string              | `wt0`                                  | Interface used for peer-IP discovery and readiness                                     |
 | `clusterInterface`       | string              | `eth0`                                 | Accepted configuration field; current socat forwarding follows the Pod's routing table |
-| `upCommand`              | string              | `/usr/local/bin/netbird up -F -l=warn` | Foreground NetBird command launched by the supervisor                                  |
+| `upCommand`              | string              | `/usr/local/bin/netbird up -F -l=warn --disable-dns` | Foreground NetBird command launched by the supervisor                                  |
 | `announceType`           | `IP` or `DNS`       | `IP`                                   | Peer IP addresses or the first configured peer DNS name                                |
 | `resourcePrefix`         | string              | `tunnel-`                              | Kubernetes resource prefix; immutable while bound                                      |
 | `storageClass`           | string              | Omitted                                | Enables a PVC per replica; otherwise state uses `emptyDir`                             |
