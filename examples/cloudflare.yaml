@@ -27,7 +27,7 @@ metadata:
   name: nginx-hello-world
   annotations:
     tlb.io/dns: hello.432372253.xyz
-    tlb.io/protocol: "http"
+    tlb.io/map-ports: "http:80"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/cloudflare

@@ -56,7 +56,7 @@ metadata:
   name: hello
   namespace: tlb-demo
   annotations:
-    tlb.io/protocol: http
+    tlb.io/map-ports: "http:80"
 spec:
   type: LoadBalancer
   loadBalancerClass: tlb.io/quick

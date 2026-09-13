@@ -9,11 +9,10 @@ in YAML.
 | Annotation               | Cloudflare                    | NetBird                                                | Default                              |
 | ------------------------ | ----------------------------- | ------------------------------------------------------ | ------------------------------------ |
 | `tlb.io/dns`             | Managed hostnames in API mode | Extra peer DNS labels; first name for DNS announcement | None                                 |
-| `tlb.io/protocol`        | Selects the origin protocol   | Not used                                               | Detected from the Service port       |
 | `tlb.io/replicas`        | Connector replicas            | Peer replicas                                          | `"1"`                                |
 | `tlb.io/topology-key`    | No replica-spreading effect   | Preferred anti-affinity topology                       | `kubernetes.io/hostname` for NetBird |
 | `tlb.io/node-selector`   | Tunnel Pod node selector      | Tunnel Pod node selector                               | No restriction                       |
-| `tlb.io/map-ports`       | Rejected                      | Explicit listener-to-Service mappings                  | Same port numbers                    |
+| `tlb.io/map-ports`       | Origin protocol and Service port                      | Explicit listener-to-Service mappings                  | Provider-specific inference                    |
 | `tlb.io/tls-secret-name` | Not used                      | Secret for listener-side TLS                           | None                                 |
 
 ## `tlb.io/dns`
@@ -23,23 +22,6 @@ Comma-separated DNS names, for example `"app.example.com,api.example.com"`. Name
 Cloudflare API mode manages proxied CNAME records for these names when `announceType` is `External`. Quick mode uses
 generated hostnames. NetBird passes names as peer DNS labels, removing the configured NetBird domain suffix first.
 `announceType: DNS` publishes the first resulting full name.
-
-## `tlb.io/protocol`
-
-Cloudflare accepts an explicit protocol, such as `"http"`, or a port-specific mapping such as `"8080:http"` or
-`"web:https"`. A mapping may identify the port by number or name.
-
-Resolution order:
-
-1. Matching port-specific annotation.
-2. A single global protocol annotation.
-3. Recognized hints in the port name (`http`, `https`, `ssh`, `rdp`).
-4. Recognized well-known port numbers.
-5. TCP fallback.
-
-Accepted origin protocols are `http`, `https`, `tcp`, `ssh`, `rdp`, and `smb`. TLB's Cloudflare provider requires
-exactly one **TCP** Service port; a mapping annotation does not enable multiport routing. Prefer an explicit protocol to
-relying on inference.
 
 ## `tlb.io/replicas`
 
@@ -63,7 +45,22 @@ the controller or application Pods. Use the Helm `nodeSelector` value for the co
 
 ## `tlb.io/map-ports`
 
-NetBird-only format:
+Cloudflare format:
+
+```text
+protocol:service-port
+```
+
+Examples: `"https:8080"`, `"ssh:admin"`. The target must be a declared Service port number or name, and must use TCP.
+The protocol must be `http`, `https`, `tcp`, `ssh`, `rdp`, or `smb`. Numeric listeners and `/tls` suffixes are rejected.
+`https` controls TLS to the origin; it does not select the public listener port.
+
+Cloudflare accepts exactly one mapping because every hostname on the tunnel reaches the same origin. Multiple origins
+require hostname/path routing selectors, which this annotation does not supply. Use separate LoadBalancer Services for
+multiple origins. Without a mapping, the Service must expose one TCP port; TLB infers its protocol from the port name,
+then well-known port numbers, then TCP fallback.
+
+NetBird format:
 
 ```text
 listen-port[/tls]:service-port[/tls[-no-verify]]

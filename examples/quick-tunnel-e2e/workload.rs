@@ -116,7 +116,7 @@ pub async fn create(client: Client, marker: &str, origin_image: &str) -> Result<
             &params,
             &Service {
                 metadata: ObjectMeta {
-                    annotations: Some(BTreeMap::from([("tlb.io/protocol".into(), "http".into())])),
+                    annotations: Some(BTreeMap::from([("tlb.io/map-ports".into(), "http:80".into())])),
                     ..metadata(NAME)
                 },
                 spec: Some(ServiceSpec {

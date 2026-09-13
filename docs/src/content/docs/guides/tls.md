@@ -72,5 +72,5 @@ verification; use it only when you deliberately accept that tradeoff.
 A mapping that uses TLS **only on the upstream side** does not require `tlb.io/tls-secret-name`. That Secret is for TLS
 termination on the listening side.
 
-For Cloudflare origins, use [`tlb.io/protocol: https`](../cloudflare/#protocols-and-origin-routing); NetBird port
+For Cloudflare origins, use [`tlb.io/map-ports: "https:443"`](../cloudflare/#protocols-and-origin-routing); NetBird port
 mapping annotations do not apply to Cloudflare.

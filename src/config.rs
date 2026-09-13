@@ -149,19 +149,7 @@ pub fn validate_service(service: &Service, class: &ClassSnapshot) -> Result<Serv
         return Err(invalid("invalid topology key"));
     }
     if class.spec.cloudflare.is_some() {
-        if ports.len() != 1 || ports[0].protocol.as_deref().unwrap_or("TCP") != "TCP" {
-            return Err(invalid("Cloudflare tunnels require exactly one TCP Service port"));
-        }
-        let protocol = crate::cloudflare::determine_port_protocol(
-            &ports[0],
-            annotations.get("tlb.io/protocol").map(String::as_str),
-        );
-        if !matches!(protocol.as_str(), "http" | "https" | "tcp" | "ssh" | "rdp" | "smb") {
-            return Err(invalid("unsupported Cloudflare origin protocol"));
-        }
-        if options.map_ports.is_some() {
-            return Err(invalid("tlb.io/map-ports is supported only by NetBird"));
-        }
+        crate::cloudflare::service_origin(service)?;
     } else {
         if ports
             .iter()
@@ -283,6 +271,100 @@ mod tests {
         assert!(validate_service(&ctx.binding.data.service, &ctx.binding.data.class).is_ok());
         ctx.binding.data.service.metadata.namespace = Some("foreign".into());
         assert!(validate_service(&ctx.binding.data.service, &ctx.binding.data.class).is_err());
+    }
+
+    #[tokio::test]
+    async fn cloudflare_mappings_select_protocol_and_service_port() {
+        let (client, _) = mock(vec![]);
+        let ctx = context(client);
+        let mut service = ctx.binding.data.service.clone();
+        service.spec.as_mut().unwrap().ports = Some(
+            serde_json::from_value(json!([
+                {"name":"web", "port":8080, "targetPort":3000},
+                {"name":"admin", "port":2222},
+                {"name":"dns", "port":53, "protocol":"UDP"}
+            ]))
+            .unwrap(),
+        );
+        for protocol in ["http", "https", "tcp", "ssh", "rdp", "smb"] {
+            for target in ["web", "8080"] {
+                service.metadata.annotations =
+                    Some([("tlb.io/map-ports".into(), format!(" {protocol} : {target} "))].into());
+                assert!(validate_service(&service, &ctx.binding.data.class).is_ok());
+                assert_eq!(
+                    crate::cloudflare::service_origin(&service).unwrap(),
+                    format!("{protocol}://api.apps.svc:8080")
+                );
+            }
+        }
+        service.metadata.annotations = Some([("tlb.io/map-ports".into(), "ssh:admin".into())].into());
+        assert_eq!(
+            crate::cloudflare::service_origin(&service).unwrap(),
+            "ssh://api.apps.svc:2222"
+        );
+        for mapping in [
+            "",
+            "https",
+            "443:8080",
+            "invalid:8080",
+            "https:missing",
+            "https:3000",
+            "https:8080,ssh:2222",
+            "https:8080,",
+            "https/tls:8080",
+            "https:8080/tls",
+            "tcp:dns",
+            "https::8080",
+        ] {
+            service.metadata.annotations = Some([("tlb.io/map-ports".into(), mapping.into())].into());
+            assert!(
+                validate_service(&service, &ctx.binding.data.class).is_err(),
+                "{mapping}"
+            );
+        }
+        service.metadata.annotations = None;
+        assert!(validate_service(&service, &ctx.binding.data.class).is_err());
+        service.spec.as_mut().unwrap().ports.as_mut().unwrap().truncate(1);
+        assert_eq!(
+            crate::cloudflare::service_origin(&service).unwrap(),
+            "http://api.apps.svc:8080"
+        );
+        service.metadata.annotations = Some(
+            [
+                ("tlb.io/protocol".into(), "https".into()),
+                ("tlb.io/map-ports".into(), "http:web".into()),
+            ]
+            .into(),
+        );
+        assert!(validate_service(&service, &ctx.binding.data.class).is_err());
+    }
+
+    #[tokio::test]
+    async fn netbird_mappings_require_numeric_listeners_and_keep_tls_validation() {
+        let (client, _) = mock(vec![]);
+        let mut ctx = context(client);
+        ctx.binding.data.class.spec = serde_json::from_value(json!({"netbird":{
+            "managementUrl":"https://netbird.example.com", "setupKeyRef":{"name":"key", "key":"token"}
+        }}))
+        .unwrap();
+        let mut service = ctx.binding.data.service.clone();
+        for mapping in ["8080:80", "443/tls:80/tls", "8080:80,8443/tls:80/tls-no-verify"] {
+            service.metadata.annotations = Some(
+                [
+                    ("tlb.io/map-ports".into(), mapping.into()),
+                    ("tlb.io/tls-secret-name".into(), "tls".into()),
+                ]
+                .into(),
+            );
+            assert!(validate_service(&service, &ctx.binding.data.class).is_ok(), "{mapping}");
+        }
+        for mapping in ["http:80", "https:80", "0:80", "15411:80", "80:80,80:80", "443/tls:80"] {
+            service.metadata.annotations = Some([("tlb.io/map-ports".into(), mapping.into())].into());
+            assert!(
+                validate_service(&service, &ctx.binding.data.class).is_err(),
+                "{mapping}"
+            );
+        }
     }
 
     #[tokio::test]
