@@ -22,6 +22,7 @@ pub const PROVIDER_LABEL: &str = "controller.tlb.io/provider";
 
 #[derive(Clone)]
 pub struct ReconcileContext {
+    pub external_refresh: std::time::Duration,
     pub client: Client,
     pub events: SimpleEventRecorder,
     pub metadata: kube::api::ObjectMeta,
@@ -29,9 +30,26 @@ pub struct ReconcileContext {
     pub binding: state::Binding,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconcileOutcome {
+    Settled,
+    DiscoveryPending,
+    ExternalRefresh,
+}
+
+impl ReconcileOutcome {
+    pub fn requeue_after(self, external_refresh: std::time::Duration) -> Option<std::time::Duration> {
+        match self {
+            Self::Settled => None,
+            Self::DiscoveryPending => Some(std::time::Duration::from_secs(5)),
+            Self::ExternalRefresh => Some(external_refresh),
+        }
+    }
+}
+
 #[async_trait]
 pub trait TunnelProvider {
-    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
+    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<ReconcileOutcome>;
     async fn cleanup_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()>;
 }
 

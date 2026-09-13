@@ -60,6 +60,7 @@ pub fn context(client: Client) -> ReconcileContext {
     }))
     .unwrap();
     ReconcileContext {
+        external_refresh: std::time::Duration::from_secs(300),
         events: SimpleEventRecorder::from_client(client.clone(), "test"),
         client,
         metadata: class.metadata.clone(),

@@ -25,10 +25,9 @@ enum Command {
 async fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
-    let reconcile_interval = std::time::Duration::from_secs(30);
     match args.command {
         None | Some(Command::Run {}) => {
-            if let Err(error) = crate::controller::run(reconcile_interval).await {
+            if let Err(error) = crate::controller::run().await {
                 log::error!("controller failed: {error}");
                 std::process::exit(1);
             }

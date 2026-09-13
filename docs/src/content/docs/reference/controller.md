@@ -28,7 +28,12 @@ disposable cluster for development.
 ## Reconciliation
 
 Services are the unit of work. The controller watches Services, classes, Secrets, tunnel workloads, and Pods, and
-periodically resyncs external state every 30 seconds.
+refreshes external state every five minutes by default. Settled classes, journals, and Quick Tunnels wait for watch
+events. Running Quick Tunnels awaiting a URL retry after five seconds; failed API and peer-address reads use bounded
+error retries. Journal and Service events drive class and orphan cleanup.
+
+Set `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` to a positive integer to configure external refreshes. The Helm value is
+`externalRefreshIntervalSeconds` (default `300`). This interval does not delay Kubernetes watch events or error retries.
 
 - Up to 16 Service reconciliations run concurrently.
 - A UID lock serializes work for one Service and its private journal.

@@ -66,3 +66,6 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# Seconds between checks of external provider state; Kubernetes changes use watches.
+externalRefreshIntervalSeconds: 300

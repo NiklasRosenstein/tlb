@@ -175,7 +175,7 @@ fn get_netbird_launch_script(
 
 #[async_trait]
 impl TunnelProvider for NetbirdConfig {
-    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<crate::ReconcileOutcome> {
         let options = crate::config::validate_service(service, &ctx.binding.data.class)?;
 
         let svc_name = service.metadata.name.as_ref().ok_or(Error::UnexpectedError(format!(
@@ -253,7 +253,7 @@ impl TunnelProvider for NetbirdConfig {
                             "Reconcile".into(),
                         )
                         .await;
-                    return Ok(());
+                    return Err(Error::ConfigError("invalid NetBird workload configuration".into()));
                 }
             }
         } else {
@@ -286,7 +286,7 @@ impl TunnelProvider for NetbirdConfig {
                         "Reconcile".into(),
                     )
                     .await;
-                return Ok(());
+                return Err(Error::ConfigError("invalid NetBird workload configuration".into()));
             }
         };
 
@@ -574,7 +574,7 @@ impl TunnelProvider for NetbirdConfig {
                         "Reconcile".into(),
                     )
                     .await;
-                return Ok(());
+                return Err(Error::ConfigError("invalid NetBird workload configuration".into()));
             }
         }
 
@@ -640,7 +640,8 @@ impl TunnelProvider for NetbirdConfig {
         let pods = pod_api
             .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels)))
             .await?;
-        let pod_netbird_ips = get_pod_netbird_peer_ips(pods.items, &ctx.events).await?;
+        let observations = get_pod_netbird_peer_ips(pods.items, &ctx.events).await?;
+        let pod_netbird_ips = observations.addresses();
         let lb_ingress: Vec<LoadBalancerIngress> = match announce_type {
             NetbirdAnnounceType::IP => pod_netbird_ips
                 .into_iter()
@@ -662,7 +663,12 @@ impl TunnelProvider for NetbirdConfig {
 
         crate::managed::patch_ingress(ctx, service, lb_ingress).await?;
 
-        Ok(())
+        if observations.incomplete() {
+            return Err(Error::UnexpectedError(
+                "NetBird peer address discovery incomplete".into(),
+            ));
+        }
+        Ok(crate::ReconcileOutcome::ExternalRefresh)
     }
 
     async fn cleanup_service(&self, ctx: &ReconcileContext, _service: &Service) -> Result<()> {
@@ -703,8 +709,27 @@ async fn query_peer_ip(pod_ip: IpAddr) -> std::io::Result<IpAddr> {
     read_peer_ip(stream, deadline).await
 }
 
-async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) -> Result<Vec<String>> {
-    let mut peer_ips = Vec::new();
+#[derive(Default, Debug)]
+pub(crate) struct PeerObservations {
+    /// Eligible Pod UIDs map to their observed IPv4 address, or None when discovery failed.
+    pub eligible: BTreeMap<String, Option<String>>,
+}
+
+impl PeerObservations {
+    pub fn incomplete(&self) -> bool {
+        self.eligible.values().any(Option::is_none)
+    }
+
+    pub fn addresses(&self) -> Vec<String> {
+        let mut addresses: Vec<_> = self.eligible.values().flatten().cloned().collect();
+        addresses.sort();
+        addresses.dedup();
+        addresses
+    }
+}
+
+async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) -> Result<PeerObservations> {
+    let mut observations = PeerObservations::default();
     for pod in pods {
         if pod.metadata.deletion_timestamp.is_some()
             || !pod.status.as_ref().is_some_and(|s| {
@@ -715,6 +740,8 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
         {
             continue;
         }
+        let uid = crate::state::required_uid(&pod.metadata)?.to_string();
+        observations.eligible.insert(uid.clone(), None);
         let Some(pod_ip) = pod
             .status
             .as_ref()
@@ -724,7 +751,10 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
             continue;
         };
         match query_peer_ip(pod_ip).await {
-            Ok(ip) => peer_ips.push(ip.to_string()),
+            Ok(IpAddr::V4(ip)) => {
+                observations.eligible.insert(uid, Some(ip.to_string()));
+            }
+            Ok(IpAddr::V6(_)) => {}
             Err(err) => {
                 log::warn!(
                     "peer IP discovery failed for {}/{}: {err}",
@@ -743,9 +773,7 @@ async fn get_pod_netbird_peer_ips(pods: Vec<Pod>, events: &SimpleEventRecorder) 
             }
         }
     }
-    peer_ips.sort();
-    peer_ips.dedup();
-    Ok(peer_ips)
+    Ok(observations)
 }
 
 #[cfg(test)]

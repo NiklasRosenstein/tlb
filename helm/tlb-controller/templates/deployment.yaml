@@ -40,6 +40,8 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
+            - name: TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS
+              value: {{ .Values.externalRefreshIntervalSeconds | quote }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
