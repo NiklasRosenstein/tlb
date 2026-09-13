@@ -14,6 +14,7 @@ pub mod leadership;
 pub mod managed;
 pub mod netbird;
 pub mod netbird_dns;
+pub mod netbird_ingress;
 pub mod simpleevent;
 pub mod state;
 

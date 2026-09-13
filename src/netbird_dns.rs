@@ -378,15 +378,18 @@ async fn reconcile_inner(
     let _guard = ctx.dns_lock.lock().await;
     let mut binding = ctx.binding.clone();
     let names = hostnames(service);
+    let discovery = crate::netbird_ingress::IngressDiscovery::from_service(service);
     // Disabling DNS must finish historical cleanup even when declarations remain.
-    if config.custom_dns.is_none() || names.as_ref().is_ok_and(BTreeSet::is_empty) {
+    if config.custom_dns.is_none()
+        || (names.as_ref().is_ok_and(BTreeSet::is_empty) && discovery.as_ref().is_ok_and(Option::is_none))
+    {
         if !binding.data.netbird_dns.targets.is_empty() {
             refresh_credentials(ctx, &mut binding).await?;
             cleanup_targets(ctx, &mut binding, None).await?;
             binding.data.netbird_dns.peers.clear();
             binding.save(ctx.client.clone()).await?;
         }
-        if config.custom_dns.is_none() && !names?.is_empty() {
+        if config.custom_dns.is_none() && (!names?.is_empty() || crate::netbird_ingress::configured(service)) {
             return Err(failure(
                 "InvalidConfiguration",
                 "custom DNS declarations require customDns on the NetBird class",
@@ -394,7 +397,8 @@ async fn reconcile_inner(
         }
         return Ok(None);
     }
-    let names = names?;
+    let mut names = names?;
+    let discovery = discovery?;
     let dns = config.custom_dns.as_ref().expect("enabled DNS checked above");
     let token = crate::get_secret_value(
         &ctx.client,
@@ -433,6 +437,16 @@ async fn reconcile_inner(
             "InvalidConfiguration",
             "DNS hostname is outside the configured zone",
         ));
+    }
+    if let Some(discovery) = discovery {
+        names.extend(discovery.hostnames(ctx.client.clone(), &domain).await?);
+    }
+    if names.is_empty() {
+        refresh_credentials(ctx, &mut binding).await?;
+        cleanup_targets(ctx, &mut binding, None).await?;
+        binding.data.netbird_dns.peers.clear();
+        binding.save(ctx.client.clone()).await?;
+        return Ok(None);
     }
     let namespace = binding
         .secret
@@ -493,6 +507,7 @@ pub(crate) async fn reconcile(
     // Services without DNS need no extra API or status reads.
     if config.custom_dns.is_none()
         && !service.annotations().contains_key(HOSTNAMES)
+        && !crate::netbird_ingress::configured(service)
         && ctx.binding.data.netbird_dns.targets.is_empty()
         && !service
             .status
@@ -525,6 +540,7 @@ pub(crate) async fn cleanup(ctx: &ReconcileContext) -> Result<()> {
             .as_ref()
             .is_some_and(|c| c.custom_dns.is_some())
             || ctx.binding.data.service.annotations().contains_key(HOSTNAMES)
+            || crate::netbird_ingress::configured(&ctx.binding.data.service)
         {
             set_condition(ctx, &ctx.binding.data.service, None).await?;
         }

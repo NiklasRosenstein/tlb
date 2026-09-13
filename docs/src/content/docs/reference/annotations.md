@@ -10,6 +10,8 @@ in YAML.
 | ------------------------ | ----------------------------- | ------------------------------------------------------ | ------------------------------------ |
 | `tlb.io/dns`             | Managed hostnames in API mode | Extra peer DNS labels; first name for DNS announcement | None                                 |
 | `tlb.io/netbird-custom-dns-hostnames` | Unsupported | Reserved custom-zone A-record hostnames | None |
+| `tlb.io/netbird-custom-dns-ingress-class` | Unsupported | IngressClass whose rule hosts contribute custom DNS names | None |
+| `tlb.io/netbird-custom-dns-ingress-namespaces` | Unsupported | Discovery namespace allowlist or `"*"` | Service namespace |
 | `tlb.io/replicas`        | Connector replicas            | Peer replicas                                          | `"1"`                                |
 | `tlb.io/topology-key`    | No replica-spreading effect   | Preferred anti-affinity topology                       | `kubernetes.io/hostname` for NetBird |
 | `tlb.io/node-selector`   | Tunnel Pod node selector      | Tunnel Pod node selector                               | No restriction                       |
@@ -29,11 +31,26 @@ generated hostnames. NetBird passes names as peer DNS labels, removing the confi
 Comma-separated explicit hostnames within the NetBird class's configured `customDns` zone. For example,
 `"grafana.private.example.com,prometheus.private.example.com"`. Names are trimmed, lowercased, deduplicated, and may have
 one trailing dot. The zone apex is allowed; wildcards, empty list entries, and names outside the zone are rejected.
-An absent or wholly blank value requests cleanup.
+An absent or wholly blank value removes explicit declarations; names still requested by Ingress discovery remain.
 
 Declaring a name grants TLB exclusive management of **all A records at that name**, including pre-existing records.
 AAAA and CNAME conflicts are reported and preserved. A second Service cannot reserve the same name in the same target.
 Peer aliases and Service announcement settings are independent. See [custom-zone DNS](../../guides/netbird/#custom-zone-dns).
+
+## `tlb.io/netbird-custom-dns-ingress-class`
+
+Name of the IngressClass served by this tunnel Service's ingress controller. Requires a NetBird class with `customDns`.
+TLB collects concrete `spec.rules[].host` values from Ingresses with this `spec.ingressClassName`, within the namespace
+scope and configured zone. It combines them with explicit custom DNS names and retains each name until its last source
+is removed. Wildcards, TLS-only hosts, hostless rules, terminating Ingresses, names outside the zone, and classless or
+annotation-only Ingresses are excluded. An empty class name is invalid; remove this annotation to disable discovery.
+
+## `tlb.io/netbird-custom-dns-ingress-namespaces`
+
+Optional comma-separated namespace allowlist for Ingress discovery, such as `"apps,monitoring"`. Defaults to the Service's
+namespace. The standalone value `"*"` selects all namespaces. Empty entries and mixtures of `*` with names are invalid.
+This annotation requires `tlb.io/netbird-custom-dns-ingress-class`; remove both annotations to disable scoped discovery.
+See [Ingress discovery](../../guides/netbird/#discover-hostnames-from-ingresses) for a complete example.
 
 ## `tlb.io/replicas`
 

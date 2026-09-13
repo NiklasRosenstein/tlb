@@ -157,7 +157,7 @@ pub fn validate_service(service: &Service, class: &ClassSnapshot) -> Result<Serv
         return Err(invalid("invalid topology key"));
     }
     if class.spec.cloudflare.is_some() {
-        if annotations.contains_key(crate::netbird_dns::HOSTNAMES) {
+        if annotations.contains_key(crate::netbird_dns::HOSTNAMES) || crate::netbird_ingress::configured(service) {
             return Err(invalid("custom DNS hostname declarations require a NetBird class"));
         }
         crate::cloudflare::service_origin(service)?;
