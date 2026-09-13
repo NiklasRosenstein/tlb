@@ -18,6 +18,12 @@ The chart is at `helm/tlb-controller`. Helm values configure the **TLB controlle
 
 Keep the chart and controller image aligned. Pin provider images separately using their class's `image` field.
 
+## External refresh
+
+`externalRefreshIntervalSeconds` defaults to `300` and sets the controller's
+`TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` environment variable. It controls checks of external provider state, including
+custom DNS drift. Kubernetes watch events and retries for unfinished work reconcile promptly, independent of this value.
+
 ## Identity and access
 
 | Value                        | Default | Meaning                                                                                                      |

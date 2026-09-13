@@ -42,6 +42,10 @@ Set `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` to a positive integer to configure e
 - Failures retry with bounded exponential delay and jitter; cleanup in progress retries promptly.
 - Controller replicas coordinate through the `tlb-controller` Lease in `POD_NAMESPACE`.
 
+NetBird custom DNS uses Service condition `tlb.io/CustomDNSReady` for convergence, missing peers, conflicts, and API
+failures. This condition is independent of the load-balancer ingress addresses. API tokens and retained cleanup
+credentials are stored only in the controller's private journals.
+
 ## Health endpoints
 
 The controller listens on port `8080`:

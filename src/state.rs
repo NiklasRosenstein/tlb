@@ -54,6 +54,8 @@ pub struct BindingData {
     pub cleaning: bool,
     #[serde(default)]
     pub cloudflare: CloudflareState,
+    #[serde(default)]
+    pub netbird_dns: crate::netbird_dns::DnsState,
 }
 
 #[derive(Clone)]
@@ -117,11 +119,18 @@ impl Binding {
     }
 
     pub async fn save(&mut self, client: Client) -> Result<()> {
+        let bytes = serde_json::to_vec(&self.data)?;
+        if self
+            .secret
+            .data
+            .as_ref()
+            .and_then(|d| d.get("binding.json"))
+            .is_some_and(|v| v.0 == bytes)
+        {
+            return Ok(());
+        }
         let mut desired = self.secret.clone();
-        desired.data = Some(BTreeMap::from([(
-            "binding.json".into(),
-            ByteString(serde_json::to_vec(&self.data)?),
-        )]));
+        desired.data = Some(BTreeMap::from([("binding.json".into(), ByteString(bytes))]));
         let api: Api<Secret> = Api::namespaced(
             client,
             self.secret

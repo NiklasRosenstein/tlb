@@ -103,6 +103,8 @@ pub enum CloudflareAnnounceType {
 pub struct NetbirdConfig {
     pub management_url: String,
     pub setup_key_ref: SeretKeyRef,
+    /// Reconcile Service hostnames in an existing NetBird custom DNS zone.
+    pub custom_dns: Option<NetbirdCustomDnsConfig>,
     /// The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is
     /// used so we can know the full domain name when using the `tlb.io/dns` annotation. If the
     /// name specified in the annotation is suffixed with this domain, it will be stripped as
@@ -135,6 +137,23 @@ pub struct NetbirdConfig {
     pub enable_ebpf_capabilities: Option<bool>,
 }
 
+/// DNS credentials remain private to the controller; Services reserve complete A-record sets.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NetbirdCustomDnsConfig {
+    /// REST API root. Defaults to managementUrl with /api appended.
+    pub api_url: Option<String>,
+    pub api_token_ref: SeretKeyRef,
+    pub zone_id: String,
+    #[serde(default = "default_dns_ttl")]
+    #[schemars(range(min = 1, max = 2147483647))]
+    pub ttl: u32,
+}
+
+pub fn default_dns_ttl() -> u32 {
+    60
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub enum NetbirdAnnounceType {
     /// Expose the tunnel using the IP address(es) of the Netbird peers.
@@ -151,7 +170,7 @@ pub enum NetbirdAnnounceType {
 /// Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
 /// a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
 ///
-#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SeretKeyRef {
     pub name: String,

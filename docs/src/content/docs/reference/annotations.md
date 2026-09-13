@@ -9,6 +9,7 @@ in YAML.
 | Annotation               | Cloudflare                    | NetBird                                                | Default                              |
 | ------------------------ | ----------------------------- | ------------------------------------------------------ | ------------------------------------ |
 | `tlb.io/dns`             | Managed hostnames in API mode | Extra peer DNS labels; first name for DNS announcement | None                                 |
+| `tlb.io/netbird-custom-dns-hostnames` | Unsupported | Reserved custom-zone A-record hostnames | None |
 | `tlb.io/replicas`        | Connector replicas            | Peer replicas                                          | `"1"`                                |
 | `tlb.io/topology-key`    | No replica-spreading effect   | Preferred anti-affinity topology                       | `kubernetes.io/hostname` for NetBird |
 | `tlb.io/node-selector`   | Tunnel Pod node selector      | Tunnel Pod node selector                               | No restriction                       |
@@ -23,11 +24,23 @@ Cloudflare API mode manages proxied CNAME records for these names when `announce
 generated hostnames. NetBird passes names as peer DNS labels, removing the configured NetBird domain suffix first.
 `announceType: DNS` publishes the first resulting full name.
 
+## `tlb.io/netbird-custom-dns-hostnames`
+
+Comma-separated explicit hostnames within the NetBird class's configured `customDns` zone. For example,
+`"grafana.private.example.com,prometheus.private.example.com"`. Names are trimmed, lowercased, deduplicated, and may have
+one trailing dot. The zone apex is allowed; wildcards, empty list entries, and names outside the zone are rejected.
+An absent or wholly blank value requests cleanup.
+
+Declaring a name grants TLB exclusive management of **all A records at that name**, including pre-existing records.
+AAAA and CNAME conflicts are reported and preserved. A second Service cannot reserve the same name in the same target.
+Peer aliases and Service announcement settings are independent. See [custom-zone DNS](../../guides/netbird/#custom-zone-dns).
+
 ## `tlb.io/replicas`
 
 A nonnegative integer. `"0"` scales tunnel workloads down but does not remove the binding or API-managed external
 resources. Multiple Cloudflare Quick replicas each have their own generated hostname. Multiple NetBird replicas each
-create a peer and, when configured, a PVC.
+create a peer and, when configured, a PVC. With NetBird custom DNS, confirmed zero ready peers removes the reserved
+names' A records while retaining their reservations.
 
 ## `tlb.io/topology-key`
 

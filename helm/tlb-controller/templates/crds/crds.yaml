@@ -93,6 +93,42 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
+                  customDns:
+                    description: Reconcile Service hostnames in an existing NetBird custom DNS zone.
+                    nullable: true
+                    properties:
+                      apiTokenRef:
+                        description: |-
+                          Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
+                          a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            nullable: true
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      apiUrl:
+                        description: REST API root. Defaults to managementUrl with /api appended.
+                        nullable: true
+                        type: string
+                      ttl:
+                        default: 60
+                        format: uint32
+                        maximum: 2147483647.0
+                        minimum: 1.0
+                        type: integer
+                      zoneId:
+                        type: string
+                    required:
+                    - apiTokenRef
+                    - zoneId
+                    type: object
                   enableEbpfCapabilities:
                     description: |-
                       Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
@@ -264,6 +300,42 @@ spec:
                     description: The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
                     nullable: true
                     type: string
+                  customDns:
+                    description: Reconcile Service hostnames in an existing NetBird custom DNS zone.
+                    nullable: true
+                    properties:
+                      apiTokenRef:
+                        description: |-
+                          Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
+                          a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
+                        properties:
+                          key:
+                            type: string
+                          name:
+                            type: string
+                          namespace:
+                            nullable: true
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      apiUrl:
+                        description: REST API root. Defaults to managementUrl with /api appended.
+                        nullable: true
+                        type: string
+                      ttl:
+                        default: 60
+                        format: uint32
+                        maximum: 2147483647.0
+                        minimum: 1.0
+                        type: integer
+                      zoneId:
+                        type: string
+                    required:
+                    - apiTokenRef
+                    - zoneId
+                    type: object
                   enableEbpfCapabilities:
                     description: |-
                       Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
