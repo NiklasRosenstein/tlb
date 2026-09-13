@@ -4,8 +4,8 @@
 export const RELEASE_FILES = [
   "Cargo.toml",
   "Cargo.lock",
-  "helm/tlb-controller/Chart.yaml",
-  "helm/tlb-controller/values.yaml",
+  "deploy/controller.yaml",
+  "deploy/tlb.yaml",
 ];
 
 export function prepareRelease(files: Map<string, string>, version: string): Map<string, string> {
@@ -32,9 +32,13 @@ export function prepareRelease(files: Map<string, string>, version: string): Map
     /\[\[package\]\]\nname = "tlb"\nversion = "(\d+\.\d+\.\d+)"/g,
     () => `[[package]]\nname = "tlb"\nversion = "${version}"`,
   );
-  replace("helm/tlb-controller/Chart.yaml", /^version:\s*"(\d+\.\d+\.\d+)"/gm, () => `version: "${version}"`);
-  replace("helm/tlb-controller/Chart.yaml", /^appVersion:\s*"(\d+\.\d+\.\d+)"/gm, () => `appVersion: "${version}"`);
-  replace("helm/tlb-controller/values.yaml", /tag:\s*"(\d+\.\d+\.\d+)"/g, () => `tag: "${version}"`);
+  for (const file of ["deploy/controller.yaml", "deploy/tlb.yaml"]) {
+    replace(
+      file,
+      /image:\s*"?ghcr\.io\/niklasrosenstein\/tlb:(\d+\.\d+\.\d+)"?/g,
+      () => `image: "ghcr.io/niklasrosenstein/tlb:${version}"`,
+    );
+  }
   return result;
 }
 
@@ -205,6 +209,7 @@ export async function release(
   await run("gh", ["auth", "status"]);
   const notes = await releaseNotes(`v${version}`, "HEAD", agent, run);
   for (const [file, text] of prepared) await write(file, text);
+  await run("deno", ["run", "--allow-read", "scripts/manifests.ts", "--check"]);
   await run("cargo", ["check", "--locked", "--all-targets", "--all-features"]);
   await run("git", ["add", "--", ...RELEASE_FILES]);
   await run("git", ["commit", "-m", `Release ${version}`]);

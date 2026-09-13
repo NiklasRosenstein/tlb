@@ -33,6 +33,9 @@ def apply(kind, name, spec=None, namespace=None, **extra):
 
 
 def get(kind, namespace=None, selector=None):
+    if namespace in ('audit-a', 'audit-b') and (kind in ('deployments', 'statefulsets', 'pods', 'pvc') or (kind == 'secrets' and selector)):
+        selector = ','.join(filter(None, [selector, 'controller.tlb.io/service-namespace=' + namespace]))
+        namespace = 'kube-system'
     argv = ['get', kind, '-o', 'json']
     argv += ['-n', namespace] if namespace else ['-A']
     if selector:
@@ -65,9 +68,9 @@ def service(namespace, name='api', finalizers=None, annotations=None, class_name
 a, b = 'audit-a', 'audit-b'
 for ns in (a, b):
     apply('Namespace', ns)
-apply('Secret', 'audit-key', namespace='tlb-system', stringData={'key': 'test-only-not-a-provider-key'})
+apply('Secret', 'audit-key', namespace='kube-system', stringData={'key': 'test-only-not-a-provider-key'})
 netbird = dict(netbird=dict(managementUrl='https://netbird.example.com',
-               setupKeyRef=dict(name='audit-key', key='key', namespace='tlb-system'), storageClass='standard'))
+               setupKeyRef=dict(name='audit-key', key='key', namespace='kube-system'), storageClass='standard'))
 apply('ClusterTunnelClass', 'audit-public', netbird)
 apply('TunnelClass', 'audit-public', dict(cloudflare={}), a)
 # Unrelated name labels in another namespace cannot veto lifecycle operations.
@@ -78,7 +81,7 @@ service(a, finalizers=['other.example/keep'])
 service(b)
 label = 'controller.tlb.io/binding-uid'
 a_deploy = wait(lambda: get('deployments', a, label), 'namespaced class wins over cluster class')[0]
-b_sts = wait(lambda: get('statefulsets', b, label), 'cluster class provisions in Service namespace')[0]
+b_sts = wait(lambda: get('statefulsets', b, label), 'cluster class provisions in controller namespace')[0]
 assert not get('statefulsets', a, label)
 
 # A journal written before the Service finalizer must allow reconciliation to resume.
@@ -93,7 +96,7 @@ wait(lambda: any(c['metadata']['name'] == 'legacy' and 'tlb.io/finalizer' in c['
 service(b, 'legacy', finalizers=['tlb.io/tunnel-cleanup'], class_name='legacy')
 legacy_service = next(s for s in get('services', b) if s['metadata']['name'] == 'legacy')
 time.sleep(3)
-assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + legacy_service['metadata']['uid'])
+assert not get('secrets', 'kube-system', 'controller.tlb.io/service-uid=' + legacy_service['metadata']['uid'])
 kubectl('delete', 'tunnelclass', 'legacy', '-n', b, '--wait=false')
 time.sleep(3)
 assert any(c['metadata']['name'] == 'legacy' for c in get('tunnelclasses', b))
@@ -103,7 +106,7 @@ wait(lambda: not any(c['metadata']['name'] == 'legacy' for c in get('tunnelclass
      'explicit legacy recovery releases class finalization')
 assert not get('deployments', b, label)
 assert a_deploy['metadata']['labels'][label] != b_sts['metadata']['labels'][label]
-assert not get('statefulsets', 'tlb-system', label)
+assert get('statefulsets', 'kube-system', label)
 assert get('secrets', b, label)[0]['data']['setup-key'] == 'dGVzdC1vbmx5LW5vdC1hLXByb3ZpZGVyLWtleQ=='
 print('PASS namespace isolation and central credential copy', flush=True)
 
@@ -113,14 +116,14 @@ wait(lambda: any(e.get('regarding', {}).get('uid') == invalid_service['metadata'
      and e.get('type') == 'Warning' and e.get('reason') == 'ReconcileFailed'
      and 'Cloudflare accepts one port mapping' in e.get('note', '')
      for e in get('events.events.k8s.io', a)), 'invalid mapping produces a Warning Event on the Service')
-assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + invalid_service['metadata']['uid'])
+assert not get('secrets', 'kube-system', 'controller.tlb.io/service-uid=' + invalid_service['metadata']['uid'])
 kubectl('delete', 'service', 'invalid-mapping', '-n', a, '--wait=false')
 
 apply('Secret', 'invalid-tls', namespace=b, stringData={'tls.crt': 'incomplete'})
 service(b, 'invalid-tls', annotations={'tlb.io/map-ports': '443/tls:80', 'tlb.io/tls-secret-name': 'invalid-tls'})
 time.sleep(3)
 tls_service = next(s for s in get('services', b) if s['metadata']['name'] == 'invalid-tls')
-assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + tls_service['metadata']['uid'])
+assert not get('secrets', 'kube-system', 'controller.tlb.io/service-uid=' + tls_service['metadata']['uid'])
 kubectl('delete', 'service', 'invalid-tls', '-n', b, '--wait=false')
 kubectl('delete', 'secret', 'invalid-tls', '-n', b)
 print('PASS malformed TLS Secret fails before binding creation', flush=True)
@@ -137,14 +140,14 @@ wait(lambda: not get('pods', b, long_selector) and not get('pvc', b, long_select
 # Persist a labelled claim without starting a provider process.
 claim = b_sts['spec']['volumeClaimTemplates'][0]
 claim['metadata']['name'] = 'audit-retained'
-claim['metadata']['namespace'] = b
+claim['metadata']['namespace'] = 'kube-system'
 claim['apiVersion'], claim['kind'] = 'v1', 'PersistentVolumeClaim'
 kubectl('apply', '-f', '-', obj=claim)
 claim_uid = get('pvc', b)[0]['metadata']['uid']
 uid = b_sts['metadata']['uid']
-patch('clustertunnelclass', 'audit-public', b, {'spec': {'netbird': {'image': 'netbirdio/netbird:test-update'}}})
-wait(lambda: get('statefulsets', b, label)[0]['spec']['template']['spec']['containers'][0]['image'] == 'netbirdio/netbird:test-update',
-     'mutable class image update reaches the existing StatefulSet')
+patch('clustertunnelclass', 'audit-public', b, {'spec': {'netbird': {'netbirdInterface': 'wt-test'}}})
+wait(lambda: 'wt-test' in get('statefulsets', b, label)[0]['spec']['template']['spec']['containers'][0]['command'][-1],
+     'mutable class interface update reaches the existing StatefulSet')
 assert get('statefulsets', b, label)[0]['metadata']['uid'] == uid
 assert get('pvc', b)[0]['metadata']['uid'] == claim_uid
 print('PASS mutable class updates preserve StatefulSet and PVC identities', flush=True)
@@ -185,15 +188,15 @@ foreign = 'blocked'
 service(b, foreign)
 time.sleep(3)
 foreign_service = next(s for s in get('services', b) if s['metadata']['name'] == foreign)
-assert not get('secrets', 'tlb-system', 'controller.tlb.io/service-uid=' + foreign_service['metadata']['uid'])
+assert not get('secrets', 'kube-system', 'controller.tlb.io/service-uid=' + foreign_service['metadata']['uid'])
 print('PASS namespaced Secret escape fails before journal or provider creation', flush=True)
 
 # Remove test resources; preserve other finalizers until their owner explicitly removes them.
 patch('services', 'api', a, {'metadata': {'finalizers': ['tlb.io/tunnel-cleanup']}})
 for ns in (a, b):
     kubectl('delete', 'namespace', ns, '--wait=false')
-wait(lambda: not get('secrets', 'tlb-system', 'controller.tlb.io/journal=true'), 'namespace deletion leaves no private journals', 90)
+wait(lambda: not get('secrets', 'kube-system', 'controller.tlb.io/journal=true'), 'namespace deletion leaves no private journals', 90)
 kubectl('delete', 'clustertunnelclass', 'audit-public', '--wait=false')
 wait(lambda: not get('clustertunnelclasses'), 'cluster class finalizes after namespace cleanup')
-kubectl('delete', 'secret', 'audit-key', '-n', 'tlb-system')
+kubectl('delete', 'secret', 'audit-key', '-n', 'kube-system')
 print('All Kubernetes lifecycle checks passed', flush=True)

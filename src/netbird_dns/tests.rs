@@ -737,7 +737,7 @@ async fn dns_configuration_defaults_and_secret_namespace_boundaries() {
         assert!(crate::config::validate_class(&class).is_err());
     }
     let data: crate::state::BindingData = serde_json::from_value(json!({
-        "service":{}, "class":class, "credentials":{}
+        "service":{}, "class":class, "credentials":{}, "workload_namespace":"kube-system"
     }))
     .unwrap();
     assert!(data.netbird_dns.targets.is_empty());

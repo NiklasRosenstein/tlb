@@ -17,17 +17,16 @@ Service; the controller runs the tunnel workloads and publishes their addresses 
 
 ## Install
 
-The Helm chart lives in this repository:
+The installation manifest runs the controller and tunnel workloads in `kube-system`:
 
 ```bash
 git clone https://github.com/NiklasRosenstein/tlb.git
 cd tlb
-helm upgrade --install tlb-controller ./helm/tlb-controller \
-  --namespace tlb-system --create-namespace \
-  --wait --timeout 120s
+kubectl apply --server-side -f deploy/tlb.yaml
+kubectl -n kube-system rollout status deployment/tlb-controller --timeout=120s
 ```
 
-Use a matching chart and controller image. See the
+Use the manifest from the release tag you want to run. See the
 [installation guide](https://niklasrosenstein.github.io/tlb/start/installation/) for image overrides, controller
 settings, and cleanup order. The published docs describe the development version; release-specific source and examples
 are available in the repository's release tags.

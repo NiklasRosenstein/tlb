@@ -24,6 +24,6 @@ The docs workflow validates pull requests and publishes `main` using GitHub Acti
 **GitHub Actions** as its build source. The site includes Pagefind search, light/dark themes, mobile navigation, and
 syntax-highlighted code examples.
 
-Describe current behavior and verify field names/defaults against the Rust types, validation, and Helm templates. Task
+Describe current behavior and verify field names/defaults against the Rust types, validation, and installation manifests. Task
 guides should link to reference pages instead of duplicating complete field tables. Keep release and migration history
 in pull requests and review records.

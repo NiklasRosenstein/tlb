@@ -1,4 +1,4 @@
-//! Credential-free public HTTP E2E using the built controller image and Helm chart.
+//! Credential-free public HTTP E2E using the built controller image and installation manifest.
 mod cluster;
 mod command;
 mod workload;
@@ -10,7 +10,7 @@ use clap::Parser;
 use cluster::Cluster;
 
 #[derive(Parser)]
-#[command(about = "Build TLB, install its chart in an isolated kind cluster, and verify a public Quick Tunnel")]
+#[command(about = "Build TLB, apply its manifest in an isolated kind cluster, and verify a public Quick Tunnel")]
 struct Options {
     #[arg(long, default_value = "kindest/node:v1.37.0")]
     node_image: String,

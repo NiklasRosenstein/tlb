@@ -1,7 +1,7 @@
 use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::{
     apps::v1::{Deployment, StatefulSet},
-    core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Secret, Service},
+    core::v1::{ConfigMap, Namespace, PersistentVolumeClaim, Pod, Secret, Service},
     networking::v1::Ingress,
 };
 use kube::{
@@ -56,6 +56,7 @@ struct Data {
     external_refresh: Duration,
     client: kube::Client,
     namespace: String,
+    workload_policy: tlb::config::WorkloadPolicy,
     events: SimpleEventRecorder,
     locks: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
     bindings: RwLock<BTreeMap<String, BindingData>>,
@@ -287,6 +288,7 @@ async fn cleanup(mut binding: Binding, data: &Data) -> Result<Action> {
         }
         return Err(error);
     }
+    managed::cleanup_owner(&ctx).await?;
     managed::patch_ingress(&ctx, &binding.data.service, Vec::new()).await?;
     data.bindings.write().unwrap().remove(&uid);
     let namespace = binding
@@ -366,6 +368,21 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
                 return cleanup(binding, data).await;
             }
             let class = desired.as_ref().expect("live desired class checked above");
+            if data.workload_policy.validate(&binding.data.class).is_err()
+                || data.workload_policy.validate(class).is_err()
+            {
+                let ctx = data.context(binding.clone());
+                managed::patch_ingress(&ctx, &service, Vec::new()).await?;
+                managed::cleanup_workloads(&ctx).await?;
+                data.workload_policy.validate(class)?;
+            }
+
+            if binding.data.workload_namespace != data.workload_policy.namespace {
+                return Err(Error::ConfigError(
+                    "drain existing bindings before changing TLB_WORKLOAD_NAMESPACE".into(),
+                ));
+            }
+
             validate_workload_inputs(&service, class, data).await?;
             let values = credentials(&service, class, data).await?;
             if requires_rebinding(&binding.data.class, class) {
@@ -400,6 +417,7 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
             if class.metadata.deletion_timestamp.is_some() {
                 return Ok(Action::await_change());
             }
+            data.workload_policy.validate(&class)?;
             validate_workload_inputs(&service, &class, data).await?;
             ensure_no_legacy(&service, data).await?;
             ensure_class_finalizer(&mut class, data).await?;
@@ -408,6 +426,8 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
                 data.client.clone(),
                 &data.namespace,
                 BindingData {
+                    workload_namespace: data.workload_policy.namespace.clone(),
+                    workload_owner: None,
                     service: service.clone(),
                     class,
                     credentials,
@@ -440,6 +460,9 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
         return cleanup(fresh, data).await;
     }
     binding = fresh;
+    if !managed::ensure_owner(&mut binding, data.client.clone()).await? {
+        return cleanup(binding, data).await;
+    }
     data.bindings
         .write()
         .unwrap()
@@ -640,6 +663,14 @@ fn affected_class(store: &Store<Service>, name: &str, namespace: Option<&str>) -
         .map(|s| ObjectRef::from_obj(&*s))
         .collect()
 }
+fn affected_workload(store: &Store<Service>, metadata: &kube::api::ObjectMeta) -> Vec<ObjectRef<Service>> {
+    store
+        .state()
+        .into_iter()
+        .filter(|s| s.metadata.uid.as_ref() == metadata.labels.as_ref().and_then(|l| l.get(SERVICE_UID_LABEL)))
+        .map(|s| ObjectRef::from_obj(&*s))
+        .collect()
+}
 fn affected_secret(
     store: &Store<Service>,
     secret: &Secret,
@@ -691,6 +722,7 @@ fn affected_secret(
                 })
             };
             owned
+                || secret.labels().get(SERVICE_UID_LABEL) == service.metadata.uid.as_ref()
                 || tls
                 || class.as_ref().is_some_and(matches)
                 || service.uid().and_then(|uid| bindings.get(&uid)).is_some_and(|b| {
@@ -790,12 +822,37 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
                     .collect::<Vec<_>>()
             },
         )
-        .owns(Api::<Deployment>::all(data.client.clone()), watcher::Config::default())
-        .owns(Api::<StatefulSet>::all(data.client.clone()), watcher::Config::default())
-        .owns(Api::<ConfigMap>::all(data.client.clone()), watcher::Config::default())
-        .owns(
+        .watches(
+            Api::<Deployment>::all(data.client.clone()),
+            watcher::Config::default(),
+            {
+                let store = store.clone();
+                move |o| affected_workload(&store, &o.metadata)
+            },
+        )
+        .watches(
+            Api::<StatefulSet>::all(data.client.clone()),
+            watcher::Config::default(),
+            {
+                let store = store.clone();
+                move |o| affected_workload(&store, &o.metadata)
+            },
+        )
+        .watches(
+            Api::<ConfigMap>::all(data.client.clone()),
+            watcher::Config::default(),
+            {
+                let store = store.clone();
+                move |o| affected_workload(&store, &o.metadata)
+            },
+        )
+        .watches(
             Api::<PersistentVolumeClaim>::all(data.client.clone()),
             watcher::Config::default(),
+            {
+                let store = store.clone();
+                move |o| affected_workload(&store, &o.metadata)
+            },
         )
         .watches(
             Api::<TunnelClass>::all(data.client.clone()),
@@ -907,11 +964,24 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
 }
 
 pub async fn run() -> Result<()> {
-    let namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "tlb-system".into());
+    let namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "kube-system".into());
+    let allow_unsafe = std::env::var("TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES")
+        .unwrap_or_else(|_| "false".into())
+        .parse::<bool>()
+        .map_err(|_| Error::ConfigError("TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES must be true or false".into()))?;
+    let workload_policy =
+        tlb::config::WorkloadPolicy::new(&namespace, std::env::var("TLB_WORKLOAD_NAMESPACE").ok(), allow_unsafe)?;
     let client = kube::Client::try_default().await?;
+    let workload_namespace = Api::<Namespace>::all(client.clone())
+        .get(&workload_policy.namespace)
+        .await?;
+    if workload_namespace.metadata.deletion_timestamp.is_some() {
+        return Err(Error::ConfigError("workload namespace is terminating".into()));
+    }
     let data = Arc::new(Data {
         dns_lock: Default::default(),
         external_refresh: external_refresh(std::env::var("TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS").ok().as_deref())?,
+        workload_policy,
         events: SimpleEventRecorder::from_client(client.clone(), "tlb-controller"),
         client: client.clone(),
         namespace: namespace.clone(),
@@ -1070,6 +1140,7 @@ mod tests {
                 events: SimpleEventRecorder::from_client(client.clone(), "test"),
                 client,
                 namespace: "tlb-system".into(),
+                workload_policy: tlb::config::WorkloadPolicy::new("tlb-system", None, false).unwrap(),
                 locks: Default::default(),
                 bindings: Default::default(),
                 failures: Default::default(),
@@ -1103,7 +1174,7 @@ mod tests {
             data: serde_json::from_value(json!({
                 "service":{"metadata":{"name":"api","namespace":"apps","uid":"service-uid"}},
                 "class":{"metadata":{"name":"public","namespace":"apps","uid":"class-uid"},"namespaced":true,"spec":{"netbird":{"managementUrl":"https://example.com","setupKeyRef":{"name":"key","key":"key"}}}},
-                "credentials":{}
+                "credentials":{}, "workload_namespace":"kube-system"
             })).unwrap(),
         };
         binding.secret.metadata.labels = Some(BTreeMap::from([

@@ -23,8 +23,8 @@ mise run update-crds
 
 ## Kubernetes lifecycle tests
 
-The isolated suite builds a controller image, creates a dedicated kind cluster with two schedulable nodes, installs the chart, and verifies
-lifecycle, NetBird DNS discovery, and deployment behavior. It requires Docker, kind, Helm, kubectl, Python 3, and `timeout`:
+The isolated suite builds a controller image, creates a dedicated kind cluster with two schedulable nodes, applies the installation manifest, and verifies
+lifecycle, NetBird DNS discovery, and deployment behavior. It requires Docker, kind, kubectl, Python 3, and `timeout`:
 
 ```bash
 bash tests/kubernetes.sh
@@ -42,12 +42,12 @@ python3 tests/kubernetes_deployment.py --kubeconfig /path/to/test-kubeconfig
 ```
 
 The NetBird suite requires the `tlb-netbird-test:audit` image from `tests/netbird/Dockerfile` loaded into kind and the
-chart's `externalRefreshIntervalSeconds` set to `7200`. The shell runner configures both. It runs a stateful DNS API
+controller’s `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` set to `7200`. The shell runner configures both. It runs a stateful DNS API
 double and peer Pods with dummy interfaces through TLB's generated launch script and readiness probe. Tests exercise
 Ingress watches, hostname selection and ownership, peer readiness and scaling, API and Kubernetes listing failures,
 leader failover, and finalizer cleanup. Ingress watch assertions follow an idle period and complete within 45 seconds, well
 before the external refresh. Real NetBird enrollment, DNS distribution to clients, tunnel traffic, and TLS require a
-separate provider integration environment.
+separate real-provider suite described below.
 
 These tests create and delete resources, terminate test controller Pods, temporarily revoke Ingress list permission,
 and temporarily remove a test CRD. They are not production-cluster checks.
@@ -55,7 +55,7 @@ and temporarily remove a test CRD. They are not production-cluster checks.
 ## Public Quick Tunnel E2E
 
 The Rust runner in `examples/quick-tunnel-e2e/` builds the controller image, creates an isolated kind cluster, installs
-TLB through its Helm chart, and creates a small nginx Pod with a run-specific response. It discovers the Quick Tunnel
+TLB through its installation manifest, and creates a small nginx Pod with a run-specific response. It discovers the Quick Tunnel
 hostname from Service status and retries public HTTPS until the response is HTTP 200 with that exact body.
 
 ```bash
@@ -100,3 +100,10 @@ pages.
 
 The documentation workflow builds pull requests and deploys `main` to GitHub Pages. Only `docs/src/content/docs/`
 contributes documentation pages; repository review notes are outside the published content collection.
+
+## NetBird integration test
+
+`mise run e2e-netbird` creates a disposable kind cluster with a NetBird combined server and two test peers. It verifies
+TCP, UDP, and TLS forwarding through a TLB-managed tunnel with eBPF disabled, including forced relay connectivity.
+The server bootstraps its own account and setup keys; no existing NetBird account is required. It also verifies runtime
+Secret cleanup. Failures preserve redacted Pod logs under `/tmp/tlb-netbird-e2e-*/logs`; the cluster is always removed.

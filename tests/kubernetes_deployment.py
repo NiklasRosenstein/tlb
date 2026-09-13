@@ -19,7 +19,7 @@ def run(*argv, obj=None, success=True):
 
 
 assert run('config', 'current-context').strip() == 'kind-tlb-audit'
-ns = 'tlb-system'
+ns = 'kube-system'
 obj = {'apiVersion': 'v1', 'kind': 'ConfigMap', 'metadata': {'name': 'guard-test', 'namespace': ns},
        'data': {'owned': 'initial'}}
 run('create', '-f', '-', obj=obj)
@@ -47,7 +47,7 @@ def lease():
 
 
 def pods():
-    return json.loads(run('get', 'pods', '-n', ns, '-l', 'app.kubernetes.io/instance=tlb-audit', '-o', 'json'))['items']
+    return json.loads(run('get', 'pods', '-n', ns, '-l', 'app.kubernetes.io/instance=tlb-controller', '-o', 'json'))['items']
 
 
 def ready_count():
@@ -62,7 +62,7 @@ try:
         time.sleep(1)
     assert ready_count() < 2, 'leader stayed ready without a required CRD'
 finally:
-    run('apply', '-f', 'helm/tlb-controller/templates/crds/crds.yaml')
+    run('apply', '-f', 'deploy/crds.yaml')
 deadline = time.monotonic() + 60
 while ready_count() != 2 and time.monotonic() < deadline:
     time.sleep(1)

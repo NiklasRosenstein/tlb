@@ -54,7 +54,7 @@ These fields belong under `spec.netbird`.
 | `resourcePrefix`         | string              | `tunnel-`                              | Kubernetes resource prefix; immutable while bound                                      |
 | `storageClass`           | string              | Omitted                                | Enables a PVC per replica; otherwise state uses `emptyDir`                             |
 | `size`                   | Kubernetes quantity | `32Mi`                                 | Requested claim size when persistent storage is enabled                                |
-| `enableEbpfCapabilities` | boolean             | `true`                                 | Adds `SYS_ADMIN` and `SYS_RESOURCE` to the always-requested `NET_ADMIN` capability     |
+| `enableEbpfCapabilities` | boolean             | `false`                                | With operator opt-in, adds `SYS_ADMIN` and `SYS_RESOURCE` to the always-requested `NET_ADMIN` capability     |
 
 Interface names must be nonempty, at most 15 characters, and contain only letters, digits, `_`, `-`, `.`, or `:`.
 Resource prefixes use the same constraints as the Cloudflare prefix.
@@ -88,7 +88,7 @@ targets; TTL and API-token changes do not restart peers. See [custom-zone DNS](.
 setupKeyRef:
   name: netbird-setup-key
   key: key
-  namespace: tlb-system
+  namespace: kube-system
 ```
 
 | Field       | Required | Meaning                                      |
@@ -118,3 +118,6 @@ For the structural schema installed in your cluster:
 kubectl explain tunnelclass.spec --recursive
 kubectl explain clustertunnelclass.spec --recursive
 ```
+
+Custom `image`, NetBird `upCommand`, and `enableEbpfCapabilities: true` require the controller
+[unsafe-workload opt-in and a separate workload namespace](../deployment/).

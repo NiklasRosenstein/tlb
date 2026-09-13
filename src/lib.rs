@@ -269,7 +269,7 @@ pub fn build_pod_affinity_for_service(service: &Service) -> Option<k8s_openapi::
         }),
         topology_key: "kubernetes.io/hostname".to_string(),
         namespace_selector: None,
-        namespaces: None,
+        namespaces: service.metadata.namespace.clone().map(|ns| vec![ns]),
         match_label_keys: None,
         mismatch_label_keys: None,
     };

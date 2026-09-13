@@ -19,12 +19,12 @@ cargo build --locked --all-features
 ./target/debug/controller --help
 ```
 
-Run `deno check scripts`, `deno lint scripts`, and `helm lint helm/tlb-controller` for auxiliary changes.
+Run `deno check scripts`, `deno lint scripts`, and `mise run check-manifests` for auxiliary changes.
 
 ## Generated resources
 
-`src/crds.rs` defines the custom resources. Generate the chart's CRDs with `mise run update-crds` and verify them with
-`mise run check-crds-uptodate`. Keep Cargo and Helm release versions consistent.
+`src/crds.rs` defines the custom resources. Generate the CRDs and installation bundle with `mise run update-crds` and
+verify them with `mise run check-crds-uptodate`. Keep the Cargo version and deployment image tag consistent.
 
 Controller behavior lives in `src/controller.rs`; provider implementations live in `src/cloudflare.rs` and
 `src/netbird.rs`. Shared configuration and helpers live in `src/lib.rs`.
@@ -33,6 +33,6 @@ Controller behavior lives in `src/controller.rs`; provider implementations live 
 
 Unit tests and compilation do not establish Kubernetes reconciliation correctness. Lifecycle changes need coverage for
 creation, repeated reconciliation, partial failures, deletion, and namespace isolation. End-to-end checks require a
-dedicated Kubernetes cluster and provider credentials. Use the rendered chart's ServiceAccount to exercise RBAC.
+dedicated Kubernetes cluster and provider credentials. Use the installation manifest’s ServiceAccount to exercise RBAC.
 
 Do not run `scripts/release.ts` for validation: it commits, tags, and pushes a release.

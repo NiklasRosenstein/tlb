@@ -58,27 +58,40 @@ impl Cluster {
     pub async fn install(&self) -> Result<()> {
         let image = format!("tlb:{}", self.name);
         command::run("kind", &["load", "docker-image", &image, "--name", &self.name], 120).await?;
+        let manifest = std::fs::read_to_string("deploy/tlb.yaml")?;
+        let manifest = manifest
+            .replace(
+                &format!("ghcr.io/niklasrosenstein/tlb:{}", env!("CARGO_PKG_VERSION")),
+                &image,
+            )
+            .replace("imagePullPolicy: IfNotPresent", "imagePullPolicy: Never");
+        let path = self.directory.join("install.yaml");
+        std::fs::write(&path, manifest)?;
+        let kubeconfig = self.kubeconfig.to_str().context("kubeconfig path")?;
         command::run(
-            "helm",
+            "kubectl",
             &[
-                "upgrade",
-                "--install",
-                "tlb-e2e",
-                "helm/tlb-controller",
                 "--kubeconfig",
-                self.kubeconfig.to_str().context("kubeconfig path")?,
-                "--namespace",
-                "tlb-system",
-                "--create-namespace",
-                "--set",
-                "image.repository=tlb",
-                "--set",
-                &format!("image.tag={}", self.name),
-                "--set",
-                "image.pullPolicy=Never",
-                "--wait",
-                "--timeout",
-                "120s",
+                kubeconfig,
+                "apply",
+                "--server-side",
+                "-f",
+                path.to_str().unwrap(),
+            ],
+            60,
+        )
+        .await?;
+        command::run(
+            "kubectl",
+            &[
+                "--kubeconfig",
+                kubeconfig,
+                "-n",
+                "kube-system",
+                "rollout",
+                "status",
+                "deployment/tlb-controller",
+                "--timeout=120s",
             ],
             150,
         )

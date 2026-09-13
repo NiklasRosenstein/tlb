@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, fmt::Debug};
 use k8s_openapi::{
     api::{
         apps::v1::{Deployment, StatefulSet},
-        core::v1::{ConfigMap, LoadBalancerIngress, PersistentVolumeClaim, Secret, Service},
+        core::v1::{ConfigMap, LoadBalancerIngress, PersistentVolumeClaim, Pod, Secret, Service},
     },
     apimachinery::pkg::apis::meta::v1::OwnerReference,
 };
@@ -27,6 +27,14 @@ impl ReconcileContext {
     pub fn labels(&self) -> Result<BTreeMap<String, String>> {
         Ok(BTreeMap::from([
             (BINDING_LABEL.into(), self.binding.uid()?.into()),
+            (
+                "controller.tlb.io/service-namespace".into(),
+                self.binding
+                    .data
+                    .service
+                    .namespace()
+                    .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?,
+            ),
             (CLASS_UID_LABEL.into(), required_uid(&self.metadata)?.into()),
             (
                 SERVICE_UID_LABEL.into(),
@@ -61,21 +69,18 @@ impl ReconcileContext {
     }
 
     pub fn owner_references(&self) -> Result<Vec<OwnerReference>> {
-        let service = &self.binding.data.service;
-        Ok(vec![OwnerReference {
-            api_version: "v1".into(),
-            kind: "Service".into(),
-            name: service.name_any(),
-            uid: required_uid(&service.metadata)?.into(),
-            controller: Some(true),
-            block_owner_deletion: Some(true),
-        }])
+        self.binding
+            .data
+            .workload_owner
+            .clone()
+            .map(|owner| vec![owner])
+            .ok_or_else(|| Error::ConfigError("binding workload owner is not initialized".into()))
     }
 
     pub fn metadata(&self, name: &str) -> Result<ObjectMeta> {
         Ok(ObjectMeta {
             name: Some(name.into()),
-            namespace: self.binding.data.service.namespace(),
+            namespace: Some(self.binding.data.workload_namespace.clone()),
             labels: Some(self.labels()?),
             owner_references: Some(self.owner_references()?),
             ..Default::default()
@@ -90,11 +95,11 @@ impl ReconcileContext {
             .map(String::as_str)
             != Some(self.binding.uid()?)
             || !metadata.owner_references.as_ref().is_some_and(|refs| {
-                refs.iter().any(|r| {
-                    r.kind == "Service"
-                        && r.api_version == "v1"
-                        && Some(&r.uid) == self.binding.data.service.metadata.uid.as_ref()
-                })
+                self.binding
+                    .data
+                    .workload_owner
+                    .as_ref()
+                    .is_some_and(|owner| refs.iter().any(|r| r == owner))
             })
         {
             return Err(Error::ConfigError(format!(
@@ -194,14 +199,8 @@ async fn delete_kind<K>(ctx: &ReconcileContext) -> Result<bool>
 where
     K: Resource<DynamicType = (), Scope = NamespaceResourceScope> + Clone + Debug + DeserializeOwned,
 {
-    // Bindings carry immutable namespace identity; selectors never use display names.
-    let namespace = ctx
-        .binding
-        .data
-        .service
-        .namespace()
-        .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
-    let api: Api<K> = Api::namespaced(ctx.client.clone(), &namespace);
+    let namespace = &ctx.binding.data.workload_namespace;
+    let api: Api<K> = Api::namespaced(ctx.client.clone(), namespace);
     let objects = api.list(&ListParams::default().labels(&ctx.selector()?)).await?;
     let found = !objects.items.is_empty();
     for object in objects {
@@ -215,7 +214,10 @@ where
 pub async fn cleanup_workloads(ctx: &ReconcileContext) -> Result<()> {
     let deployments = delete_kind::<Deployment>(ctx).await?;
     let statefulsets = delete_kind::<StatefulSet>(ctx).await?;
-    if deployments || statefulsets {
+    let pods = Api::<Pod>::namespaced(ctx.client.clone(), &ctx.binding.data.workload_namespace)
+        .list(&ListParams::default().labels(&ctx.selector()?))
+        .await?;
+    if deployments || statefulsets || !pods.items.is_empty() {
         return Err(Error::CleanupPending);
     }
     Ok(())
@@ -377,5 +379,232 @@ mod tests {
         assert!(format!("{name}-2147483647").len() <= 63);
         assert!(name.ends_with(ctx.binding.uid().unwrap()));
         assert!(crate::config::dns_label(&name));
+    }
+}
+
+const OWNER_LABEL: &str = "controller.tlb.io/workload-owner";
+
+fn local_owner_name(binding: &crate::state::Binding) -> Result<String> {
+    Ok(format!("tlb-owner-{}", binding.uid()?))
+}
+
+/// Persist the owner before any provider can create dependent resources.
+pub async fn ensure_owner(binding: &mut crate::state::Binding, client: kube::Client) -> Result<bool> {
+    let namespace = &binding.data.workload_namespace;
+    if binding.secret.namespace().as_deref() == Some(namespace) {
+        let owner = OwnerReference {
+            api_version: "v1".into(),
+            kind: "Secret".into(),
+            name: binding.secret.name_any(),
+            uid: binding.uid()?.into(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        };
+        if binding.data.workload_owner.as_ref() != Some(&owner) {
+            binding.data.workload_owner = Some(owner);
+            binding.save(client).await?;
+        }
+        return Ok(true);
+    }
+    let api = Api::<ConfigMap>::namespaced(client.clone(), namespace);
+    let name = local_owner_name(binding)?;
+    let existing = api.get_opt(&name).await?;
+    let object = match existing {
+        Some(object) => {
+            if object.labels().get(OWNER_LABEL).map(String::as_str) != Some(binding.uid()?) {
+                return Err(Error::ConfigError(
+                    "workload owner name is occupied by an unrelated ConfigMap".into(),
+                ));
+            }
+            if object.metadata.deletion_timestamp.is_some()
+                || binding
+                    .data
+                    .workload_owner
+                    .as_ref()
+                    .is_some_and(|owner| object.uid().as_ref() != Some(&owner.uid))
+            {
+                return Ok(false);
+            }
+            object
+        }
+        None if binding.data.workload_owner.is_some() => return Ok(false),
+        None => {
+            api.create(
+                &PostParams::default(),
+                &ConfigMap {
+                    metadata: ObjectMeta {
+                        name: Some(name),
+                        namespace: Some(namespace.clone()),
+                        labels: Some(BTreeMap::from([(OWNER_LABEL.into(), binding.uid()?.into())])),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await?
+        }
+    };
+    if binding.data.workload_owner.is_none() {
+        binding.data.workload_owner = Some(OwnerReference {
+            api_version: "v1".into(),
+            kind: "ConfigMap".into(),
+            name: object.name_any(),
+            uid: required_uid(&object.metadata)?.into(),
+            controller: Some(true),
+            block_owner_deletion: Some(true),
+        });
+        binding.save(client).await?;
+    }
+    Ok(true)
+}
+
+pub async fn cleanup_owner(ctx: &ReconcileContext) -> Result<()> {
+    if ctx.binding.secret.namespace().as_deref() == Some(&ctx.binding.data.workload_namespace) {
+        return Ok(());
+    }
+    let api = Api::<ConfigMap>::namespaced(ctx.client.clone(), &ctx.binding.data.workload_namespace);
+    if let Some(object) = api.get_opt(&local_owner_name(&ctx.binding)?).await? {
+        if object.labels().get(OWNER_LABEL).map(String::as_str) != Some(ctx.binding.uid()?)
+            || ctx
+                .binding
+                .data
+                .workload_owner
+                .as_ref()
+                .is_some_and(|owner| object.uid().as_ref() != Some(&owner.uid))
+        {
+            return Err(Error::ConfigError("refusing to delete unrelated workload owner".into()));
+        }
+        delete(&api, &object).await?;
+        return Err(Error::CleanupPending);
+    }
+    Ok(())
+}
+
+/// Avoid writes and Pod rotations when only source metadata changes.
+pub async fn apply_secret(ctx: &ReconcileContext, desired: &Secret) -> Result<Secret> {
+    let api = Api::<Secret>::namespaced(ctx.client.clone(), &ctx.binding.data.workload_namespace);
+    if let Some(existing) = api.get_opt(&desired.name_any()).await? {
+        ctx.check_owned(&existing.metadata)?;
+        if existing.metadata.deletion_timestamp.is_some() {
+            return Err(Error::CleanupPending);
+        }
+        if existing.data == desired.data && existing.type_ == desired.type_ {
+            return Ok(existing);
+        }
+    }
+    apply(ctx, &api, desired).await
+}
+
+pub async fn prune_secret(ctx: &ReconcileContext, name: &str) -> Result<()> {
+    let api = Api::<Secret>::namespaced(ctx.client.clone(), &ctx.binding.data.workload_namespace);
+    let Some(secret) = api.get_opt(name).await? else {
+        return Ok(());
+    };
+    ctx.check_owned(&secret.metadata)?;
+    let pods = Api::<Pod>::namespaced(ctx.client.clone(), &ctx.binding.data.workload_namespace)
+        .list(&ListParams::default().labels(&ctx.selector()?))
+        .await?;
+    if pods.iter().any(|pod| {
+        pod.spec
+            .as_ref()
+            .and_then(|spec| spec.volumes.as_ref())
+            .is_some_and(|volumes| {
+                volumes
+                    .iter()
+                    .any(|v| v.secret.as_ref().and_then(|s| s.secret_name.as_deref()) == Some(name))
+            })
+    }) {
+        return Ok(());
+    }
+    delete(&api, &secret).await
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::test_support::{Exchange, context, mock};
+
+    fn list(path: &'static str, items: serde_json::Value) -> Exchange {
+        Exchange {
+            method: "GET",
+            path,
+            status: 200,
+            response: json!({"metadata":{},"items":items}),
+            check: |_| {},
+        }
+    }
+
+    #[tokio::test]
+    async fn remaining_pods_block_storage_cleanup_even_without_workload_controllers() {
+        let (client, requests) = mock(vec![
+            list("/apis/apps/v1/namespaces/tunnels/deployments", json!([])),
+            list("/apis/apps/v1/namespaces/tunnels/statefulsets", json!([])),
+            list(
+                "/api/v1/namespaces/tunnels/pods",
+                json!([{"metadata":{"name":"terminating","deletionTimestamp":"2026-01-01T00:00:00Z"}}]),
+            ),
+        ]);
+        let mut ctx = context(client);
+        ctx.binding.data.workload_namespace = "tunnels".into();
+        assert!(matches!(cleanup_workloads(&ctx).await, Err(Error::CleanupPending)));
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn copied_secret_cleanup_uses_persisted_namespace_and_uid_without_source_reads() {
+        let (client, _) = mock(vec![]);
+        let mut ctx = context(client);
+        ctx.binding.data.workload_namespace = "tunnels".into();
+        let mut metadata = ctx.metadata("runtime-key").unwrap();
+        metadata.uid = Some("runtime-uid".into());
+        metadata.resource_version = Some("4".into());
+        let (client, requests) = mock(vec![
+            list("/api/v1/namespaces/tunnels/configmaps", json!([])),
+            list("/api/v1/namespaces/tunnels/secrets", json!([{"metadata":metadata}])),
+            Exchange {
+                method: "DELETE",
+                path: "/api/v1/namespaces/tunnels/secrets/runtime-key",
+                status: 200,
+                response: json!({"apiVersion":"v1","kind":"Status","status":"Success"}),
+                check: |body| {
+                    assert_eq!(body["preconditions"]["uid"], "runtime-uid");
+                    assert_eq!(body["preconditions"]["resourceVersion"], "4");
+                },
+            },
+            list("/api/v1/namespaces/tunnels/persistentvolumeclaims", json!([])),
+        ]);
+        ctx.client = client;
+        assert!(matches!(cleanup_storage(&ctx).await, Err(Error::CleanupPending)));
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unchanged_runtime_secret_does_not_write_or_rotate() {
+        let (client, _) = mock(vec![]);
+        let ctx = context(client);
+        let desired = Secret {
+            metadata: ctx.metadata("key").unwrap(),
+            data: Some(BTreeMap::from([("key".into(), k8s_openapi::ByteString(vec![1]))])),
+            ..Default::default()
+        };
+        let mut existing = desired.clone();
+        existing.metadata.resource_version = Some("3".into());
+        let (client, requests) = mock(vec![Exchange {
+            method: "GET",
+            path: "/api/v1/namespaces/apps/secrets/key",
+            status: 200,
+            response: serde_json::to_value(existing).unwrap(),
+            check: |_| {},
+        }]);
+        let ctx = context(client);
+        assert_eq!(
+            apply_secret(&ctx, &desired)
+                .await
+                .unwrap()
+                .resource_version()
+                .as_deref(),
+            Some("3")
+        );
+        assert!(requests.lock().unwrap().is_empty());
     }
 }

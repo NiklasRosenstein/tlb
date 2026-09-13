@@ -10,6 +10,7 @@ parser.add_argument('--kubeconfig', required=True)
 args = parser.parse_args()
 base = ['kubectl', '--kubeconfig', args.kubeconfig, '--request-timeout=10s']
 ns, other = 'dns-audit', 'dns-other'
+workload_ns = 'dns-tunnels'
 class_key = 'tlb.io/netbird-custom-dns-ingress-class'
 scope_key = 'tlb.io/netbird-custom-dns-ingress-namespaces'
 hosts_key = 'tlb.io/netbird-custom-dns-hostnames'
@@ -117,13 +118,17 @@ def settled():
 
 
 assert run('config', 'current-context').strip() == 'kind-tlb-audit', 'dedicated test cluster required'
-deployment = get('deployment', namespace='tlb-system', selector='app.kubernetes.io/instance=tlb-audit')
+deployment = get('deployment', namespace='kube-system', selector='app.kubernetes.io/instance=tlb-controller')
 assert len(deployment) == 1
 controller_env = deployment[0]['spec']['template']['spec']['containers'][0]['env']
 assert any(e['name'] == 'TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS' and e.get('value') == '7200'
            for e in controller_env), 'watch tests require the two-hour external refresh interval'
-for namespace in (ns, other):
+for namespace in (ns, other, workload_ns):
     run('apply', '-f', '-', obj=dict(apiVersion='v1', kind='Namespace', metadata=dict(name=namespace)))
+run('-n', 'kube-system', 'set', 'env', 'deployment/tlb-controller',
+    'TLB_WORKLOAD_NAMESPACE=' + workload_ns, 'TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES=true')
+run('-n', 'kube-system', 'rollout', 'status', 'deployment/tlb-controller', '--timeout=60s')
+time.sleep(17)
 apply('Pod', 'dns-api', dict(containers=[dict(name='api', image='tlb-netbird-test:audit', imagePullPolicy='Never',
       readinessProbe=dict(httpGet=dict(path='/__state', port=8080), periodSeconds=1))]))
 apply('Service', 'dns-api', dict(selector={'app': 'dns-api'}, ports=[dict(port=8080)]))
@@ -196,11 +201,11 @@ annotations({hosts_key: f'explicit.{zone}'})
 dns(['explicit'], 'removing last hostname source removes its records')
 
 # Drop readiness without deleting the peer, then restore it through the same generated probe.
-peer = sorted(get('pods', selector='controller.tlb.io/binding-uid'), key=lambda p: p['metadata']['name'])[1]
+peer = sorted(get('pods', namespace=workload_ns, selector='controller.tlb.io/binding-uid'), key=lambda p: p['metadata']['name'])[1]
 peer_name = peer['metadata']['name']
-run('exec', peer_name, '-n', ns, '--', 'ip', 'link', 'delete', 'wt0')
+run('exec', peer_name, '-n', workload_ns, '--', 'ip', 'link', 'delete', 'wt0')
 dns(['explicit'], 'unready peer is withdrawn by the Pod watch', ('100.64.0.10',), seconds=120)
-run('exec', peer_name, '-n', ns, '--', 'sh', '-c',
+run('exec', peer_name, '-n', workload_ns, '--', 'sh', '-c',
     'ip link add wt0 type dummy; ip addr add 100.64.0.11/32 dev wt0; ip link set wt0 up')
 dns(['explicit'], 'recovered peer readiness restores its address')
 annotations({'tlb.io/replicas': '1'})
@@ -231,7 +236,7 @@ api('/__control', dict(failure=0))
 dns(['explicit', 'recover'], 'provider recovery reconciles pending Ingress changes')
 
 # A genuine Kubernetes authorization failure must not be mistaken for an empty discovery result.
-roles = get('clusterrole', namespace='tlb-system', selector='app.kubernetes.io/instance=tlb-audit')
+roles = get('clusterrole', namespace='kube-system', selector='app.kubernetes.io/instance=tlb-controller')
 role = next(r for r in roles if any('ingresses' in rule.get('resources', []) for rule in r['rules']))
 original_rules = role['rules']
 rules = json.loads(json.dumps(original_rules))
@@ -248,14 +253,14 @@ finally:
 dns(['explicit', 'renamed'], 'restored list permission safely reconciles the complete hostname set')
 
 # Terminate the active controller while DNS ownership is live.
-lease = get('lease', 'tlb-controller', 'tlb-system')['spec']['holderIdentity']
-controllers = get('pods', namespace='tlb-system', selector='app.kubernetes.io/instance=tlb-audit')
+lease = get('lease', 'tlb-controller', 'kube-system')['spec']['holderIdentity']
+controllers = get('pods', namespace='kube-system', selector='app.kubernetes.io/instance=tlb-controller')
 leaders = [p for p in controllers if 'acquired controller leadership' in
-           run('logs', p['metadata']['name'], '-n', 'tlb-system')]
+           run('logs', p['metadata']['name'], '-n', 'kube-system')]
 assert len(leaders) == 1, 'exactly one controller must have acquired leadership'
 leader = leaders[0]
-run('delete', 'pod', leader['metadata']['name'], '-n', 'tlb-system', '--wait=false')
-wait(lambda: get('lease', 'tlb-controller', 'tlb-system')['spec']['holderIdentity'] != lease,
+run('delete', 'pod', leader['metadata']['name'], '-n', 'kube-system', '--wait=false')
+wait(lambda: get('lease', 'tlb-controller', 'kube-system')['spec']['holderIdentity'] != lease,
      'standby controller takes over live DNS ownership', 90)
 settled()
 ingress('recover', f'after-restart.{zone}')
@@ -273,8 +278,14 @@ api('/__control', dict(failure=0))
 dns([], 'Service deletion cleans owned records and preserves unrelated record')
 wait(lambda: all(s['metadata']['name'] != 'ingress' for s in get('service')),
      'Service finalizer completes')
-wait(lambda: not get('secrets', namespace='tlb-system', selector='controller.tlb.io/journal=true'),
+wait(lambda: not get('secrets', namespace='kube-system', selector='controller.tlb.io/journal=true'),
      'DNS binding journal finalizes')
 for namespace in (ns, other):
     run('delete', 'namespace', namespace, '--wait=false')
 print('PASS NetBird DNS Kubernetes E2E suite', flush=True)
+
+run('-n', 'kube-system', 'set', 'env', 'deployment/tlb-controller',
+    'TLB_WORKLOAD_NAMESPACE=kube-system', 'TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES=false')
+run('-n', 'kube-system', 'rollout', 'status', 'deployment/tlb-controller', '--timeout=60s')
+time.sleep(17)
+run('delete', 'namespace', workload_ns, '--wait=true', '--timeout=30s')

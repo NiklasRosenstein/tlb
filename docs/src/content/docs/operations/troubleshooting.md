@@ -10,7 +10,7 @@ kubectl -n apps describe service website
 kubectl -n apps get tunnelclasses
 kubectl get clustertunnelclasses
 kubectl -n apps get pods -l controller.tlb.io/binding-uid
-kubectl -n tlb-system logs deployment/tlb-controller --since=10m
+kubectl -n kube-system logs deployment/tlb-controller --since=10m
 ```
 
 Replace `apps`, `website`, and the controller Deployment name with your installation's names. Service reconciliation
@@ -42,7 +42,7 @@ kubectl -n apps logs <tunnel-pod> --all-containers --tail=100
 kubectl -n apps logs <tunnel-pod> --all-containers --previous --tail=100
 ```
 
-For Pending Pods, inspect node selectors, admission failures, image pull errors, and unbound PVCs. The chart's
+For Pending Pods, inspect node selectors, admission failures, image pull errors, and unbound PVCs. The Deployment's
 scheduling settings affect the controller; Service annotations affect tunnel Pods.
 
 For NetBird, check the management URL, reusable setup key, required image tools, permitted network capabilities, and TLS
@@ -77,7 +77,7 @@ Keep the controller running. Restore provider access or the required credential,
 list journal metadata without printing credential contents:
 
 ```bash
-kubectl -n tlb-system get secrets \
+kubectl -n kube-system get secrets \
   -l controller.tlb.io/journal=true \
   -o custom-columns=NAME:.metadata.name,CREATED:.metadata.creationTimestamp
 ```
@@ -90,8 +90,8 @@ from its name or remove a finalizer before external and Kubernetes cleanup is ve
 Inspect Pod logs, ServiceAccount permissions, CRD availability, and the Lease in the controller namespace:
 
 ```bash
-kubectl -n tlb-system get lease tlb-controller
-kubectl -n tlb-system describe deployment tlb-controller
+kubectl -n kube-system get lease tlb-controller
+kubectl -n kube-system describe deployment tlb-controller
 ```
 
 The leader waits for its primary caches to initialize. Watch errors clear readiness and restart its controller loops. A

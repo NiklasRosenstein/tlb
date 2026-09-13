@@ -173,6 +173,42 @@ fn get_netbird_launch_script(
     Ok(launch_script.join("\n"))
 }
 
+/// Creation and apply have separate field ownership; TLS removal must delete the reserved fields explicitly.
+async fn remove_tls_template(ctx: &ReconcileContext, api: &Api<StatefulSet>, statefulset: &StatefulSet) -> Result<()> {
+    ctx.check_owned(&statefulset.metadata)?;
+    let template = &statefulset
+        .spec
+        .as_ref()
+        .ok_or_else(|| Error::ConfigError("StatefulSet spec missing".into()))?
+        .template;
+    let has_tls = template.spec.as_ref().is_some_and(|spec| {
+        spec.volumes
+            .as_ref()
+            .is_some_and(|volumes| volumes.iter().any(|v| v.name == "tls-secret"))
+            || spec.containers.iter().any(|c| {
+                c.name == "netbird"
+                    && c.volume_mounts
+                        .as_ref()
+                        .is_some_and(|mounts| mounts.iter().any(|m| m.mount_path == "/tls"))
+            })
+    }) || template
+        .metadata
+        .as_ref()
+        .and_then(|m| m.annotations.as_ref())
+        .is_some_and(|annotations| annotations.contains_key("controller.tlb.io/tls-secret-version"));
+    if has_tls {
+        api.patch(&statefulset.name_any(), &kube::api::PatchParams::default(), &kube::api::Patch::<serde_json::Value>::Strategic(serde_json::json!({
+            "metadata": {"uid": crate::state::required_uid(&statefulset.metadata)?, "resourceVersion": statefulset.resource_version().ok_or_else(|| Error::ConfigError("StatefulSet resource version missing".into()))?},
+            "spec": {"template": {
+                "metadata": {"annotations": {"controller.tlb.io/tls-secret-version": null}},
+                "spec": {"volumes": [{"name": "tls-secret", "$patch": "delete"}],
+                    "containers": [{"name": "netbird", "volumeMounts": [{"mountPath": "/tls", "$patch": "delete"}]}]}
+            }}
+        }))).await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl TunnelProvider for NetbirdConfig {
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<crate::ReconcileOutcome> {
@@ -214,7 +250,7 @@ impl TunnelProvider for NetbirdConfig {
             }
         };
 
-        let resource_namespace = svc_namespace.clone();
+        let resource_namespace = ctx.binding.data.workload_namespace.clone();
         let owner_references = ctx.owner_references()?;
         let pod_api = Api::<Pod>::namespaced(ctx.client.clone(), &resource_namespace);
         let match_labels = ctx.labels()?;
@@ -315,6 +351,11 @@ impl TunnelProvider for NetbirdConfig {
             },
         ];
 
+        env.push(EnvVar {
+            name: "NB_DISABLE_EBPF_WG_PROXY".into(),
+            value: Some((!self.enable_ebpf_capabilities.unwrap_or(false)).to_string()),
+            ..Default::default()
+        });
         let mut announce_type = self.announce_type.clone().unwrap_or(DEFAULT_ANNOUNCE_TYPE);
         let mut lb_ingress_host: Option<String> = None;
         if let Some(dns) = &options.dns {
@@ -400,8 +441,8 @@ impl TunnelProvider for NetbirdConfig {
         // Prepare capabilities list - always include NET_ADMIN
         let mut capabilities = vec!["NET_ADMIN".into()];
 
-        // Add eBPF capabilities if enabled (defaults to true)
-        if self.enable_ebpf_capabilities.unwrap_or(true) {
+        // eBPF capability grants require operator opt-in.
+        if self.enable_ebpf_capabilities.unwrap_or(false) {
             capabilities.push("SYS_ADMIN".into());
             capabilities.push("SYS_RESOURCE".into());
         }
@@ -514,6 +555,7 @@ impl TunnelProvider for NetbirdConfig {
 
         // Add TLS secret volume and mount if TLS is used in port mappings
         let mut secret_resource_version: Option<String> = None;
+        let runtime_tls_name = ctx.resource_name("nb-", "-tls")?;
         if needs_tls_secret {
             if let Some(tls_secret_name) = &options.tls_secret_name {
                 // Get the TLS secret to track its resourceVersion for pod rotation
@@ -521,7 +563,20 @@ impl TunnelProvider for NetbirdConfig {
                 match secret_api.get_opt(tls_secret_name).await? {
                     Some(secret) => {
                         crate::config::validate_tls_secret(&secret)?;
-                        secret_resource_version = secret.metadata.resource_version.clone();
+                        let runtime = Secret {
+                            metadata: ctx.metadata(&runtime_tls_name)?,
+                            type_: Some("kubernetes.io/tls".into()),
+                            data: Some(
+                                secret
+                                    .data
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter(|(key, _)| key == "tls.crt" || key == "tls.key")
+                                    .collect(),
+                            ),
+                            ..Default::default()
+                        };
+                        secret_resource_version = crate::managed::apply_secret(ctx, &runtime).await?.resource_version();
                     }
                     None => {
                         ctx.events
@@ -546,7 +601,7 @@ impl TunnelProvider for NetbirdConfig {
                 volumes.push(Volume {
                     name: "tls-secret".into(),
                     secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                        secret_name: Some(tls_secret_name.clone()),
+                        secret_name: Some(runtime_tls_name.clone()),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -613,7 +668,7 @@ impl TunnelProvider for NetbirdConfig {
 
         let credential_secret = crate::managed::apply(
             ctx,
-            &Api::<Secret>::namespaced(ctx.client.clone(), svc_namespace),
+            &Api::<Secret>::namespaced(ctx.client.clone(), &resource_namespace),
             &credential_secret,
         )
         .await?;
@@ -634,8 +689,12 @@ impl TunnelProvider for NetbirdConfig {
             );
         let statefulset_api = Api::<StatefulSet>::namespaced(ctx.client.clone(), &resource_namespace);
         // Invalid or immutable desired fields leave the running workload intact.
-        crate::managed::apply(ctx, &statefulset_api, &statefulset).await?;
+        let statefulset = crate::managed::apply(ctx, &statefulset_api, &statefulset).await?;
 
+        if !needs_tls_secret {
+            remove_tls_template(ctx, &statefulset_api, &statefulset).await?;
+            crate::managed::prune_secret(ctx, &runtime_tls_name).await?;
+        }
         // Find all pods that match the resource's selector.
         let pods = pod_api
             .list(&kube::api::ListParams::default().labels_from(&Selector::from_iter(match_labels)))
