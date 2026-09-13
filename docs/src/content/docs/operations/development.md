@@ -64,9 +64,8 @@ exact response marker. It requires registry and Cloudflare access, but no Cloudf
 The public retry budget defaults to 240 seconds. `mise run e2e -- --help` lists `--tunnel-timeout`, `--node-image`, and
 `--origin-image`. Live provider tests can fail because of provider, DNS, or registry availability.
 
-CI runs the Kubernetes group and real NetBird scenario as separate jobs. The Quick Tunnel workflow runs its scenario
-on pull requests and pushes to `develop`. `mise run e2e-kubernetes`, `mise run e2e-netbird`, and
-`mise run e2e-quick-tunnel` select the same scenarios locally.
+CI runs all seven scenarios in the `kubernetes` job using `mise run e2e -- all`. `mise run e2e-kubernetes`,
+`mise run e2e-netbird`, and `mise run e2e-quick-tunnel` select scenario groups or individual scenarios locally.
 
 ## Documentation
 

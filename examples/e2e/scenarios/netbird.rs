@@ -80,7 +80,8 @@ pub async fn run(c: &Cluster) -> Result<()> {
     ))
     .await?;
     k.apply(object("Service",NS,"server",json!({"spec":{"selector":{"app":"netbird-server"},"ports":[{"name":"http","port":80},{"name":"stun","port":3478,"protocol":"UDP"}]}}))).await?;
-    k.apply(object("Pod",NS,"server",json!({"metadata":{"labels":{"app":"netbird-server"}},"spec":{"automountServiceAccountToken":false,"containers":[{"name":"server","image":"netbirdio/netbird-server:0.76.3","args":["--config","/etc/netbird/config.yaml"],"env":[{"name":"NB_SETUP_PAT_ENABLED","value":"true"}],"volumeMounts":[{"name":"config","mountPath":"/etc/netbird","readOnly":true},{"name":"data","mountPath":"/var/lib/netbird"}]}],"volumes":[{"name":"config","secret":{"secretName":"server-config"}},{"name":"data","emptyDir":{}}]}}))).await?;
+    // Geolocation is unused by this fixture and requires an external database download.
+    k.apply(object("Pod",NS,"server",json!({"metadata":{"labels":{"app":"netbird-server"}},"spec":{"automountServiceAccountToken":false,"containers":[{"name":"server","image":"netbirdio/netbird-server:0.76.3","args":["--config","/etc/netbird/config.yaml"],"env":[{"name":"NB_SETUP_PAT_ENABLED","value":"true"},{"name":"NB_DISABLE_GEOLOCATION","value":"true"}],"volumeMounts":[{"name":"config","mountPath":"/etc/netbird","readOnly":true},{"name":"data","mountPath":"/var/lib/netbird"}]}],"volumes":[{"name":"config","secret":{"secretName":"server-config"}},{"name":"data","emptyDir":{}}]}}))).await?;
     k.apply(object("Pod",NS,"tools",json!({"spec":{"automountServiceAccountToken":false,"containers":[{"name":"tools","image":PYTHON,"command":["sleep","1800"]}]}}))).await?;
     pod_ready(k, "tools").await?;
     pod_ready(k, "server").await?;
@@ -104,6 +105,12 @@ pub async fn run(c: &Cluster) -> Result<()> {
         }
     })
     .await?;
+    ensure!(
+        k.logs(NS, "server", "server")
+            .await?
+            .contains("geolocation service is disabled"),
+        "fixture must disable geolocation database downloads"
+    );
     let bootstrap = bootstrap.into_inner().unwrap().context("bootstrap response")?;
     let token = bootstrap["personal_access_token"].as_str().context("bootstrap PAT")?;
     c.secret(token);
