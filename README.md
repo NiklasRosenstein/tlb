@@ -74,3 +74,15 @@ npm --prefix docs run build
 See [docs/README.md](docs/README.md) for authoring and publishing, and
 [development documentation](https://niklasrosenstein.github.io/tlb/operations/development/) for controller and
 Kubernetes tests.
+
+## Releases
+
+Run `deno run -A scripts/release.ts 0.8.0` from the repository root with a clean working tree. The script requires
+authenticated `gh` and `codex` CLIs, generates release notes from commits and source changes since the preceding version
+tag, checks Cargo, commits the version files, atomically pushes the branch and tag to `origin`, and creates a GitHub
+release. Use `--agent=claude` to generate notes with an authenticated Claude CLI instead. Notes generation must succeed
+before any version files change.
+
+To publish a GitHub release for an existing local and remote tag, including retrying failed GitHub release creation, run
+`deno run -A scripts/release.ts 0.7.0 --github-only`. This mode summarizes the tagged code and creates the GitHub
+release; it does not commit or push. GitHub release creation is separate from the atomic Git push.
