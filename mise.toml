@@ -105,9 +105,19 @@ depends = ["check", "fmt-check", "lint", "test", "build", "check-crds-uptodate",
 [tasks.e2e-quick-tunnel]
 tools.kind = "0.33.0"
 description = "Verify public Quick Tunnel traffic through the built image and installation manifest in kind"
-run = "cargo run --locked --example quick-tunnel-e2e --"
+run = "cargo run --locked --example e2e -- quick-tunnel"
 
 [tasks.e2e-netbird]
 tools.kind = "0.33.0"
 description = "Verify NetBird forwarding and cleanup with an isolated server in kind"
-run = "bash tests/netbird.sh"
+run = "cargo run --locked --example e2e -- netbird"
+
+[tasks.e2e]
+tools.kind = "0.33.0"
+description = "Run selected Rust E2E scenarios in disposable kind clusters"
+run = "cargo run --locked --example e2e --"
+
+[tasks.e2e-kubernetes]
+tools.kind = "0.33.0"
+description = "Verify Kubernetes lifecycle, class isolation, DNS, failover, and runtime policy"
+run = "cargo run --locked --example e2e -- kubernetes"

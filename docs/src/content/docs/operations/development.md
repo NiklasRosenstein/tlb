@@ -21,62 +21,52 @@ CRDs after changing their Rust definitions:
 mise run update-crds
 ```
 
-## Kubernetes lifecycle tests
+## End-to-end scenarios
 
-The isolated suite builds a controller image, creates a dedicated kind cluster with two schedulable nodes, applies the installation manifest, and verifies
-lifecycle, NetBird DNS discovery, and deployment behavior. It requires Docker, kind, kubectl, Python 3, and `timeout`:
-
-```bash
-bash tests/kubernetes.sh
-```
-
-The script uses a dedicated kubeconfig and deletes its `tlb-audit` cluster on exit. It refuses to run when a cluster of
-that name already exists.
-
-For an existing **test** cluster named `tlb-audit`, run the suites directly:
+The Rust runner in `examples/e2e/` builds the controller image once per invocation and runs named scenarios in
+separate disposable kind clusters. It requires Docker, kind, and kubectl; the real NetBird scenario also uses OpenSSL.
+Python runs inside fixture containers, so a host Python installation is not needed.
 
 ```bash
-python3 tests/kubernetes.py --kubeconfig /path/to/test-kubeconfig
-python3 tests/kubernetes_netbird.py --kubeconfig /path/to/test-kubeconfig
-python3 tests/kubernetes_deployment.py --kubeconfig /path/to/test-kubeconfig
+mise run e2e -- kubernetes
+mise run e2e -- netbird
+mise run e2e -- quick-tunnel
+mise run e2e -- all
 ```
 
-The NetBird suite requires the `tlb-netbird-test:audit` image from `tests/netbird/Dockerfile` loaded into kind and the
-controller’s `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` set to `7200`. The shell runner configures both. It runs a stateful DNS API
-double and peer Pods with dummy interfaces through TLB's generated launch script and readiness probe. Tests exercise
-Ingress watches, hostname selection and ownership, peer readiness and scaling, API and Kubernetes listing failures,
-leader failover, and finalizer cleanup. Ingress watch assertions follow an idle period and complete within 45 seconds, well
-before the external refresh. Real NetBird enrollment, DNS distribution to clients, tunnel traffic, and TLS require a
-separate real-provider suite described below.
+The `kubernetes` group runs `lifecycle`, `classes`, `dns`, `deployment`, and `runtime`. Each can also be selected directly,
+for example `mise run e2e -- classes`. Kubernetes API operations and assertions use the dedicated cluster client.
+The runner never adopts an existing cluster or reads the ambient Kubernetes context.
 
-These tests create and delete resources, terminate test controller Pods, temporarily revoke Ingress list permission,
-and temporarily remove a test CRD. They are not production-cluster checks.
+| Scenario | Coverage |
+| --- | --- |
+| `lifecycle` | Class precedence, namespace isolation, validation, storage preservation, Service recreation and cleanup |
+| `classes` | Live cluster-class deletion across namespaces, same-name local classes, class recreation and local overrides |
+| `dns` | Ingress watches, DNS ownership, peer readiness/scaling, provider and RBAC failures, failover and cleanup |
+| `deployment` | UID/resource-version guards, readiness after CRD loss/restoration, controller leadership failover |
+| `runtime` | Copied Secrets, rotation/pruning, source loss, restart-safe cleanup, and unsafe-policy revocation for both class scopes |
+| `netbird` | Disposable real server and peers; TCP, UDP and TLS forwarding without eBPF, including forced relay, and Secret cleanup |
+| `quick-tunnel` | Public HTTPS through Cloudflare with exact response contents |
 
-## Public Quick Tunnel E2E
+The DNS scenario uses two schedulable nodes and the API/peer fixture in `tests/netbird/`. It configures a two-hour
+external refresh interval and checks watch-triggered updates after an idle period, within 45 seconds. The real NetBird
+scenario bootstraps its own account and setup keys; it requires no existing provider account. These are distinct tests
+of DNS reconciliation and real tunnel traffic.
 
-The Rust runner in `examples/quick-tunnel-e2e/` builds the controller image, creates an isolated kind cluster, installs
-TLB through its installation manifest, and creates a small nginx Pod with a run-specific response. It discovers the Quick Tunnel
-hostname from Service status and retries public HTTPS until the response is HTTP 200 with that exact body.
+Every scenario has a 25-minute deadline, with shorter deadlines for subprocesses and individual assertions. Clusters
+and run-specific images are removed after success, failure, and handled interruption. A failed scenario preserves
+redacted Pod logs, Pod status and events under its printed temporary directory (`/tmp/tlb-e2e-*/logs` on Linux).
+Scenario groups report failures separately and continue with fresh clusters; interruption stops the group. If cluster
+cleanup fails, the error includes its kubeconfig path for manual recovery. Forced termination can prevent cleanup.
 
-```bash
-mise run e2e-quick-tunnel
-```
+The Quick Tunnel scenario uses HTTP/2 transport and verifies public HTTPS in Rust with certificate validation and an
+exact response marker. It requires registry and Cloudflare access, but no Cloudflare account, API token, or domain.
+The public retry budget defaults to 240 seconds. `mise run e2e -- --help` lists `--tunnel-timeout`, `--node-image`, and
+`--origin-image`. Live provider tests can fail because of provider, DNS, or registry availability.
 
-Docker must be running. The runner needs access to container registries and Cloudflare; it needs no Cloudflare account,
-API token, or domain. The test class selects HTTP/2 transport so outbound UDP is not required. It uses its own
-kubeconfig and never selects your current Kubernetes context. Each run gets a unique cluster name and image tag. Cluster
-and image cleanup runs after success, failure, and Ctrl-C. Failure diagnostics are retained under the printed temporary
-directory. Forced termination can prevent cleanup; use the printed cluster name with `kind delete cluster --name <name>`
-in that case.
-
-The public HTTP retry budget defaults to 240 seconds. Use `mise run e2e-quick-tunnel -- --help` to see the
-`--tunnel-timeout`, `--node-image`, and `--origin-image` options. Commands and the overall scenario also have deadlines.
-The HTTP assertion runs in Rust with certificate verification enabled; no external curl process is required.
-
-The **Quick Tunnel E2E** GitHub Actions workflow runs on every pull request and every push to `develop`, including
-merges. Manual runs are also available. It exercises a live external provider, whose
-[Quick Tunnel service has no uptime guarantee](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/).
-It complements the isolated lifecycle tests and can fail because of provider, DNS, or registry availability.
+CI runs the Kubernetes group and real NetBird scenario as separate jobs. The Quick Tunnel workflow runs its scenario
+on pull requests and pushes to `develop`. `mise run e2e-kubernetes`, `mise run e2e-netbird`, and
+`mise run e2e-quick-tunnel` select the same scenarios locally.
 
 ## Documentation
 
@@ -100,10 +90,3 @@ pages.
 
 The documentation workflow builds pull requests and deploys `main` to GitHub Pages. Only `docs/src/content/docs/`
 contributes documentation pages; repository review notes are outside the published content collection.
-
-## NetBird integration test
-
-`mise run e2e-netbird` creates a disposable kind cluster with a NetBird combined server and two test peers. It verifies
-TCP, UDP, and TLS forwarding through a TLB-managed tunnel with eBPF disabled, including forced relay connectivity.
-The server bootstraps its own account and setup keys; no existing NetBird account is required. It also verifies runtime
-Secret cleanup. Failures preserve redacted Pod logs under `/tmp/tlb-netbird-e2e-*/logs`; the cluster is always removed.

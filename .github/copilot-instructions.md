@@ -32,7 +32,10 @@ Controller behavior lives in `src/controller.rs`; provider implementations live 
 ## Validation boundaries
 
 Unit tests and compilation do not establish Kubernetes reconciliation correctness. Lifecycle changes need coverage for
-creation, repeated reconciliation, partial failures, deletion, and namespace isolation. End-to-end checks require a
-dedicated Kubernetes cluster and provider credentials. Use the installation manifest’s ServiceAccount to exercise RBAC.
+creation, repeated reconciliation, partial failures, deletion, and namespace isolation. Run `mise run e2e -- kubernetes`
+for the Rust E2E suites, or select a focused scenario such as `mise run e2e -- classes`. The common runner builds the
+controller, installs its manifest, and exercises RBAC through its ServiceAccount in disposable kind clusters.
+Real-provider scenarios are `netbird` and `quick-tunnel`; both provision their own test resources without existing
+provider credentials.
 
 Do not run `scripts/release.ts` for validation: it commits, tags, and pushes a release.
