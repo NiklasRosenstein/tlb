@@ -13,8 +13,11 @@ kubectl -n apps get pods -l controller.tlb.io/binding-uid
 kubectl -n tlb-system logs deployment/tlb-controller --since=10m
 ```
 
-Replace `apps`, `website`, and the controller Deployment name with your installation's names. Kubernetes Events are best
-effort; controller logs remain useful when Event publication is unavailable.
+Replace `apps`, `website`, and the controller Deployment name with your installation's names. Service reconciliation
+errors appear as **Warning** Events with reason `ReconcileFailed` on the affected Service. The Event message includes
+validation failures such as invalid `tlb.io/map-ports` values. Check the Events section of `kubectl describe service`.
+Normal cleanup waits do not generate warnings. Events are best effort; controller logs remain useful when Event
+publication is unavailable.
 
 ## The Service has no external address
 
@@ -24,7 +27,7 @@ Check that:
 - The Service has an allocated ClusterIP and declared ports.
 - A matching class exists. A class in the Service namespace takes precedence over the cluster-scoped class.
 - The class configures exactly one provider and all required credential keys exist.
-- The Service annotations pass validation. Cloudflare accepts only one TCP port; replica counts cannot be negative.
+- The Service annotations pass validation. Cloudflare routes to one selected TCP Service port; replica counts cannot be negative.
 - The tunnel Pods are ready and can reach their provider and the application Service.
 
 For Quick Tunnels, discovery waits for a running, ready connector and a generated URL. For NetBird IP mode, the
