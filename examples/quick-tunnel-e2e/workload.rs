@@ -116,19 +116,28 @@ pub async fn create(client: Client, marker: &str, origin_image: &str) -> Result<
             &params,
             &Service {
                 metadata: ObjectMeta {
-                    annotations: Some(BTreeMap::from([("tlb.io/map-ports".into(), "http:80".into())])),
+                    annotations: Some(BTreeMap::from([("tlb.io/map-ports".into(), "http:origin".into())])),
                     ..metadata(NAME)
                 },
                 spec: Some(ServiceSpec {
                     type_: Some("LoadBalancer".into()),
                     load_balancer_class: Some("tlb.io/quick".into()),
                     selector: Some(BTreeMap::from([("app".into(), NAME.into())])),
-                    ports: Some(vec![ServicePort {
-                        name: Some("http".into()),
-                        port: 80,
-                        target_port: Some(IntOrString::Int(80)),
-                        ..Default::default()
-                    }]),
+                    // Only the explicitly mapped second port reaches the HTTP origin.
+                    ports: Some(vec![
+                        ServicePort {
+                            name: Some("unused".into()),
+                            port: 8080,
+                            target_port: Some(IntOrString::Int(9)),
+                            ..Default::default()
+                        },
+                        ServicePort {
+                            name: Some("origin".into()),
+                            port: 18080,
+                            target_port: Some(IntOrString::Int(80)),
+                            ..Default::default()
+                        },
+                    ]),
                     ..Default::default()
                 }),
                 ..Default::default()
