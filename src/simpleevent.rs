@@ -45,9 +45,10 @@ impl SimpleEventRecorder {
         reason: String,
         note: Option<String>,
         action: String,
-    ) -> Result<(), kube_client::Error> {
-        self.recorder
-            .publish(
+    ) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.recorder.publish(
                 &Event {
                     type_: event_type,
                     reason,
@@ -56,7 +57,11 @@ impl SimpleEventRecorder {
                     secondary: None,
                 },
                 object_ref,
-            )
-            .await
+            ),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(()))) {
+            log::warn!("Kubernetes event publication failed: {result:?}");
+        }
     }
 }

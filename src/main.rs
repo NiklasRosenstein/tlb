@@ -28,7 +28,10 @@ async fn main() {
     let reconcile_interval = std::time::Duration::from_secs(30);
     match args.command {
         None | Some(Command::Run {}) => {
-            crate::controller::run(reconcile_interval).await;
+            if let Err(error) = crate::controller::run(reconcile_interval).await {
+                log::error!("controller failed: {error}");
+                std::process::exit(1);
+            }
         }
         Some(Command::Crds {}) => {
             print!(

@@ -44,13 +44,35 @@ pub struct CloudflareConfig {
     pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
     pub image: Option<String>,
-    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+    /// Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+    #[serde(default)]
+    pub transport_protocol: CloudflareTransportProtocol,
+    /// Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
     pub resource_prefix: Option<String>,
     /// Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
     pub tunnel_prefix: Option<String>,
     /// How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
     /// [`CloudflareAnnounceType::External`].
     pub announce_type: Option<CloudflareAnnounceType>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum CloudflareTransportProtocol {
+    #[default]
+    Auto,
+    Quic,
+    Http2,
+}
+
+impl AsRef<str> for CloudflareTransportProtocol {
+    fn as_ref(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Quic => "quic",
+            Self::Http2 => "http2",
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
@@ -100,7 +122,7 @@ pub struct NetbirdConfig {
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
     /// [`NetbirdAnnounceType::IP`].
     pub announce_type: Option<NetbirdAnnounceType>,
-    /// Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+    /// Prefix for NetBird Kubernetes resources. Immutable while a Service is bound. Defaults to `tunnel-`.
     pub resource_prefix: Option<String>,
     /// The storage class to use for the persistent volume claim. If this is not set, an emptyDir
     /// will be used.
@@ -127,7 +149,7 @@ pub enum NetbirdAnnounceType {
 
 ///
 /// Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
-/// otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+/// a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
 ///
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -135,4 +157,27 @@ pub struct SeretKeyRef {
     pub name: String,
     pub namespace: Option<String>,
     pub key: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloudflare_transport_defaults_and_validates() {
+        let default: CloudflareConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(default.transport_protocol.as_ref(), "auto");
+        for protocol in ["auto", "quic", "http2"] {
+            let config: CloudflareConfig =
+                serde_json::from_value(serde_json::json!({ "transportProtocol": protocol })).unwrap();
+            assert_eq!(config.transport_protocol.as_ref(), protocol);
+            assert_eq!(serde_json::to_value(config).unwrap()["transportProtocol"], protocol);
+        }
+        assert!(
+            serde_json::from_value::<CloudflareConfig>(serde_json::json!({
+                "transportProtocol": "https"
+            }))
+            .is_err()
+        );
+    }
 }

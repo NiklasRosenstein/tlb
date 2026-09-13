@@ -28,7 +28,9 @@ spec:
                     nullable: true
                     type: string
                   announceType:
-                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    description: |-
+                      How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
+                      [`CloudflareAnnounceType::External`].
                     enum:
                     - Internal
                     - External
@@ -54,8 +56,16 @@ spec:
                     nullable: true
                     type: string
                   resourcePrefix:
-                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+                    description: Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
                     nullable: true
+                    type: string
+                  transportProtocol:
+                    default: auto
+                    description: Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+                    enum:
+                    - auto
+                    - quic
+                    - http2
                     type: string
                   tunnelPrefix:
                     description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
@@ -66,11 +76,14 @@ spec:
                 description: |-
                   Configuration for creating Netbird tunnels.
 
-                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the pod and can therefore not be used by the service that is exposed by the tunnel.
+                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the
+                  pod and can therefore not be used by the service that is exposed by the tunnel.
                 nullable: true
                 properties:
                   announceType:
-                    description: How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to [`NetbirdAnnounceType::IP`].
+                    description: |-
+                      How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
+                      [`NetbirdAnnounceType::IP`].
                     enum:
                     - IP
                     - DNS
@@ -81,17 +94,26 @@ spec:
                     nullable: true
                     type: string
                   enableEbpfCapabilities:
-                    description: Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container. When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                    description: |-
+                      Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
+                      When enabled, prevents fallback to user space proxy. Defaults to `true`.
                     nullable: true
                     type: boolean
                   image:
-                    description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the controller.
+                    description: |-
+                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
+                      must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
+                      controller.
                     nullable: true
                     type: string
                   managementUrl:
                     type: string
                   netbirdDnsDomain:
-                    description: The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is used so we can know the full domain name when using the `tlb.io/dns` annotation. If the name specified in the annotation is suffixed with this domain, it will be stripped as Netbird will automatically append it.
+                    description: |-
+                      The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is
+                      used so we can know the full domain name when using the `tlb.io/dns` annotation. If the
+                      name specified in the annotation is suffixed with this domain, it will be stripped as
+                      Netbird will automatically append it.
                     nullable: true
                     type: string
                   netbirdInterface:
@@ -99,11 +121,13 @@ spec:
                     nullable: true
                     type: string
                   resourcePrefix:
-                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+                    description: Prefix for NetBird Kubernetes resources. Immutable while a Service is bound. Defaults to `tunnel-`.
                     nullable: true
                     type: string
                   setupKeyRef:
-                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    description: |-
+                      Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
+                      a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
                     properties:
                       key:
                         type: string
@@ -117,15 +141,21 @@ spec:
                     - name
                     type: object
                   size:
-                    description: The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage classes have a minimum size, so you might need to adjust this value.
+                    description: |-
+                      The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage
+                      classes have a minimum size, so you might need to adjust this value.
                     nullable: true
                     type: string
                   storageClass:
-                    description: The storage class to use for the persistent volume claim. If this is not set, an emptyDir will be used.
+                    description: |-
+                      The storage class to use for the persistent volume claim. If this is not set, an emptyDir
+                      will be used.
                     nullable: true
                     type: string
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
+                    description: |-
+                      The command to run alias to `netbird up` in the container. Defaults to
+                      [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:
@@ -139,7 +169,6 @@ spec:
         type: object
     served: true
     storage: true
-    subresources: {}
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -170,7 +199,9 @@ spec:
                     nullable: true
                     type: string
                   announceType:
-                    description: How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to [`CloudflareAnnounceType::External`].
+                    description: |-
+                      How to announce the tunnel DNS name in the Service's `loadBalancerStatus`. Defaults to
+                      [`CloudflareAnnounceType::External`].
                     enum:
                     - Internal
                     - External
@@ -196,8 +227,16 @@ spec:
                     nullable: true
                     type: string
                   resourcePrefix:
-                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `cf-`.
+                    description: Prefix for Cloudflare Kubernetes resources. Immutable while a Service is bound. Defaults to `cf-`.
                     nullable: true
+                    type: string
+                  transportProtocol:
+                    default: auto
+                    description: Edge transport. Use HTTP/2 when outbound UDP is unavailable.
+                    enum:
+                    - auto
+                    - quic
+                    - http2
                     type: string
                   tunnelPrefix:
                     description: Prefix for the name of the Cloudflare tunnel. Defaults to `kube-`. Only used in API mode.
@@ -208,11 +247,14 @@ spec:
                 description: |-
                   Configuration for creating Netbird tunnels.
 
-                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the pod and can therefore not be used by the service that is exposed by the tunnel.
+                  Important: The special port [`crate::netbird::NETBIRD_PEER_IP_PORT`] is used to expose the Netbird peer IP in the
+                  pod and can therefore not be used by the service that is exposed by the tunnel.
                 nullable: true
                 properties:
                   announceType:
-                    description: How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to [`NetbirdAnnounceType::IP`].
+                    description: |-
+                      How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
+                      [`NetbirdAnnounceType::IP`].
                     enum:
                     - IP
                     - DNS
@@ -223,17 +265,26 @@ spec:
                     nullable: true
                     type: string
                   enableEbpfCapabilities:
-                    description: Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container. When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                    description: |-
+                      Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
+                      When enabled, prevents fallback to user space proxy. Defaults to `true`.
                     nullable: true
                     type: boolean
                   image:
-                    description: The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the controller.
+                    description: |-
+                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
+                      must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
+                      controller.
                     nullable: true
                     type: string
                   managementUrl:
                     type: string
                   netbirdDnsDomain:
-                    description: The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is used so we can know the full domain name when using the `tlb.io/dns` annotation. If the name specified in the annotation is suffixed with this domain, it will be stripped as Netbird will automatically append it.
+                    description: |-
+                      The domain used for Netbird DNS, usually `netbird.selfhosted` or `netbird.cloud`. This is
+                      used so we can know the full domain name when using the `tlb.io/dns` annotation. If the
+                      name specified in the annotation is suffixed with this domain, it will be stripped as
+                      Netbird will automatically append it.
                     nullable: true
                     type: string
                   netbirdInterface:
@@ -241,11 +292,13 @@ spec:
                     nullable: true
                     type: string
                   resourcePrefix:
-                    description: Prefix for the resources that are created for the Netbird tunnel. Defaults to `tunnel-`.
+                    description: Prefix for NetBird Kubernetes resources. Immutable while a Service is bound. Defaults to `tunnel-`.
                     nullable: true
                     type: string
                   setupKeyRef:
-                    description: Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`], otherwise the namespace is ignored and the [`TunnelClassSpec`]'s namespace is used.
+                    description: |-
+                      Reference to a secret key. May be namespaced if used in a [`ClusterTunnelClassSpec`],
+                      a [`TunnelClassSpec`] must reference its own namespace; foreign namespaces are rejected.
                     properties:
                       key:
                         type: string
@@ -259,15 +312,21 @@ spec:
                     - name
                     type: object
                   size:
-                    description: The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage classes have a minimum size, so you might need to adjust this value.
+                    description: |-
+                      The size of the persistent volume claim. Defaults to `32Mi`. Note that some storage
+                      classes have a minimum size, so you might need to adjust this value.
                     nullable: true
                     type: string
                   storageClass:
-                    description: The storage class to use for the persistent volume claim. If this is not set, an emptyDir will be used.
+                    description: |-
+                      The storage class to use for the persistent volume claim. If this is not set, an emptyDir
+                      will be used.
                     nullable: true
                     type: string
                   upCommand:
-                    description: The command to run alias to `netbird up` in the container. Defaults to [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
+                    description: |-
+                      The command to run alias to `netbird up` in the container. Defaults to
+                      [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
                 required:
@@ -281,4 +340,3 @@ spec:
         type: object
     served: true
     storage: true
-    subresources: {}

@@ -1,14 +1,14 @@
 [tools]
-rust = { version = "1.87", components = "rustfmt,clippy" }
+rust = { version = "1.98.1", components = "rustfmt,clippy" }
+deno = "2.9.6"
 
 # Type checking
 
 [tasks.crate-check]
-depends = ["crate-lint"]
+run = "cargo check --locked --all-targets --all-features"
 
 [tasks.scripts-check]
 run = "deno check scripts"
-tools.deno = "2"
 
 [tasks.check]
 depends = ["crate-check", "scripts-check"]
@@ -20,11 +20,9 @@ run = "cargo fmt --all"
 
 [tasks.aux-fmt]
 run = "deno fmt README.md .github/ --line-width 120"
-tools.deno = "2"
 
 [tasks.scripts-fmt]
 run = "deno fmt scripts --line-width 120"
-tools.deno = "2"
 
 [tasks.fmt]
 depends = ["crate-fmt", "aux-fmt", "scripts-fmt"]
@@ -36,11 +34,9 @@ run = "cargo fmt --all  --check"
 
 [tasks.aux-fmt-check]
 run = "deno fmt README.md .github/ --line-width 120  --check"
-tools.deno = "2"
 
 [tasks.scripts-fmt-check]
 run = "deno fmt scripts --line-width 120 --check"
-tools.deno = "2"
 
 [tasks.fmt-check]
 depends = ["crate-fmt-check", "aux-fmt-check", "scripts-fmt-check"]
@@ -48,11 +44,10 @@ depends = ["crate-fmt-check", "aux-fmt-check", "scripts-fmt-check"]
 # Linting
 
 [tasks.crate-lint]
-run = "cargo clippy --all-features -- -D warnings"
+run = "cargo clippy --locked --all-targets --all-features -- -D warnings"
 
 [tasks.scripts-lint]
 run = "deno lint scripts"
-tools.deno = "2"
 
 [tasks.lint]
 depends = ["crate-lint", "scripts-lint"]
@@ -60,11 +55,10 @@ depends = ["crate-lint", "scripts-lint"]
 # Fixing
 
 [tasks.crate-fix]
-run = "cargo clippy --all-features --fix --allow-dirty --allow-staged"
+run = "cargo clippy --locked --all-targets --all-features --fix --allow-dirty --allow-staged"
 
 [tasks.scripts-fix]
 run = "deno lint --fix scripts"
-tools.deno = "2"
 
 [tasks.fix]
 depends = ["crate-fix", "scripts-fix"]
@@ -72,7 +66,7 @@ depends = ["crate-fix", "scripts-fix"]
 # Build
 
 [tasks.crate-build]
-run = "cargo build --all-features"
+run = "cargo build --locked --all-features"
 
 [tasks.build]
 depends = ["crate-build"]
@@ -81,27 +75,32 @@ wait_for = ["lint"]
 # Tests
 
 [tasks.crate-test]
-run = "cargo test --all-features"
+run = "cargo test --locked --all-features"
 
-# [tasks.scripts-test]
-# run = "deno test scripts --allow-read --allow-env --allow-run --allow-net --allow-write"
-# tools.deno = "2"
+[tasks.scripts-test]
+run = "deno test scripts"
 
 [tasks.test]
-depends = ["crate-test"] #, "scripts-test"]
+depends = ["crate-test", "scripts-test"]
 wait_for = ["build"]
 
 # CRDs
 
 [tasks.update-crds]
 depends = ["build"]
-run = "cargo run crds > ./helm/tlb-controller/templates/crds/crds.yaml"
+run = "cargo run --locked -- crds > ./helm/tlb-controller/templates/crds/crds.yaml"
 wait_for = ["build", "test"]
 
 [tasks.check-crds-uptodate]
 depends = ["build"]
-run = "bash -c 'diff -u helm/tlb-controller/templates/crds/crds.yaml <(cargo run crds)'"
+run = "bash -c 'diff -u helm/tlb-controller/templates/crds/crds.yaml <(cargo run --locked -- crds)'"
 wait_for = ["build", "test"]
 
 [tasks.ci]
-depends = ["fmt-check", "lint", "test", "build", "check-crds-uptodate"]
+depends = ["check", "fmt-check", "lint", "test", "build", "check-crds-uptodate"]
+
+[tasks.e2e-quick-tunnel]
+tools.kind = "0.33.0"
+tools.helm = "4.2.4"
+description = "Verify public Quick Tunnel traffic through the built image and Helm chart in kind"
+run = "cargo run --locked --example quick-tunnel-e2e --"

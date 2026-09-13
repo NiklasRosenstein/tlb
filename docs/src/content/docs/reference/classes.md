@@ -18,14 +18,15 @@ ClusterIP, and at least one Service port.
 
 These fields belong under `spec.cloudflare`.
 
-| Field            | Type                     | Default / requirement           | Meaning                                                                     |
-| ---------------- | ------------------------ | ------------------------------- | --------------------------------------------------------------------------- |
-| `accountId`      | string                   | Omitted in Quick mode           | 32-character hexadecimal Cloudflare account ID; required with `apiTokenRef` |
-| `apiTokenRef`    | Secret reference         | Omitted in Quick mode           | API credential; required with `accountId`                                   |
-| `image`          | string                   | `cloudflare/cloudflared:latest` | Connector image                                                             |
-| `resourcePrefix` | string                   | `cf-`                           | Prefix for Kubernetes resources; immutable while bound                      |
-| `tunnelPrefix`   | string                   | `kube-`                         | Prefix used when creating the external API tunnel                           |
-| `announceType`   | `External` or `Internal` | `External`                      | Managed hostnames or internal tunnel identifier in Service status           |
+| Field               | Type                       | Default / requirement           | Meaning                                                                                 |
+| ------------------- | -------------------------- | ------------------------------- | --------------------------------------------------------------------------------------- |
+| `accountId`         | string                     | Omitted in Quick mode           | 32-character hexadecimal Cloudflare account ID; required with `apiTokenRef`             |
+| `apiTokenRef`       | Secret reference           | Omitted in Quick mode           | API credential; required with `accountId`                                               |
+| `image`             | string                     | `cloudflare/cloudflared:latest` | Connector image                                                                         |
+| `resourcePrefix`    | string                     | `cf-`                           | Prefix for Kubernetes resources; immutable while bound                                  |
+| `tunnelPrefix`      | string                     | `kube-`                         | Prefix used when creating the external API tunnel                                       |
+| `announceType`      | `External` or `Internal`   | `External`                      | Managed hostnames or internal tunnel identifier in Service status                       |
+| `transportProtocol` | `auto`, `quic`, or `http2` | `auto`                          | Transport from cloudflared to the Cloudflare edge; `http2` uses TCP when UDP is blocked |
 
 Quick mode uses `cloudflare: {}`. API mode requires both `accountId` and `apiTokenRef`.
 
