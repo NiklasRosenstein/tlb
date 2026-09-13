@@ -51,6 +51,7 @@ fn external_refresh(value: Option<&str>) -> Result<Duration> {
 }
 
 struct Data {
+    dns_lock: Arc<Mutex<()>>,
     external_refresh: Duration,
     client: kube::Client,
     namespace: String,
@@ -81,6 +82,7 @@ impl Data {
     }
     fn context(&self, binding: Binding) -> ReconcileContext {
         ReconcileContext {
+            dns_lock: self.dns_lock.clone(),
             external_refresh: self.external_refresh,
             client: self.client.clone(),
             events: self.events.clone(),
@@ -410,6 +412,7 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
                     credentials,
                     cleaning: false,
                     cloudflare: Default::default(),
+                    netbird_dns: Default::default(),
                 },
             )
             .await?
@@ -669,12 +672,18 @@ fn affected_secret(
                     .or_else(|| clusters.get(&ObjectRef::new(name)).map(|c| c.spec.inner.clone()))
             });
             let matches = |spec: &tlb::crds::TunnelClassInnerSpec| {
-                let reference = spec
-                    .netbird
-                    .as_ref()
-                    .map(|c| &c.setup_key_ref)
-                    .or_else(|| spec.cloudflare.as_ref().and_then(|c| c.api_token_ref.as_ref()));
-                reference.is_some_and(|r| {
+                let references: Vec<_> = if let Some(nb) = &spec.netbird {
+                    std::iter::once(&nb.setup_key_ref)
+                        .chain(nb.custom_dns.iter().map(|d| &d.api_token_ref))
+                        .collect()
+                } else {
+                    spec.cloudflare
+                        .as_ref()
+                        .and_then(|c| c.api_token_ref.as_ref())
+                        .into_iter()
+                        .collect()
+                };
+                references.iter().any(|r| {
                     r.name == secret.name_any()
                         && r.namespace.as_ref().or(service.metadata.namespace.as_ref())
                             == secret.metadata.namespace.as_ref()
@@ -683,10 +692,14 @@ fn affected_secret(
             owned
                 || tls
                 || class.as_ref().is_some_and(matches)
-                || service
-                    .uid()
-                    .and_then(|uid| bindings.get(&uid))
-                    .is_some_and(|b| matches(&b.class.spec))
+                || service.uid().and_then(|uid| bindings.get(&uid)).is_some_and(|b| {
+                    matches(&b.class.spec)
+                        || b.netbird_dns.targets.iter().any(|t| {
+                            t.token_ref.name == secret.name_any()
+                                && t.token_ref.namespace.as_ref().or(b.service.metadata.namespace.as_ref())
+                                    == secret.metadata.namespace.as_ref()
+                        })
+                })
         })
         .map(|s| ObjectRef::from_obj(&*s))
         .collect()
@@ -883,6 +896,7 @@ pub async fn run() -> Result<()> {
     let namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "tlb-system".into());
     let client = kube::Client::try_default().await?;
     let data = Arc::new(Data {
+        dns_lock: Default::default(),
         external_refresh: external_refresh(std::env::var("TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS").ok().as_deref())?,
         events: SimpleEventRecorder::from_client(client.clone(), "tlb-controller"),
         client: client.clone(),
@@ -1037,6 +1051,7 @@ mod tests {
                 "default",
             );
             let data = Arc::new(Data {
+                dns_lock: Default::default(),
                 external_refresh: Duration::from_secs(300),
                 events: SimpleEventRecorder::from_client(client.clone(), "test"),
                 client,

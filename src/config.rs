@@ -44,7 +44,15 @@ pub fn validate_class(class: &ClassSnapshot) -> Result<()> {
             if let Some(prefix) = &netbird.resource_prefix {
                 validate_prefix(prefix)?;
             }
-            vec![&netbird.setup_key_ref]
+            let mut references = vec![&netbird.setup_key_ref];
+            if let Some(dns) = &netbird.custom_dns {
+                crate::netbird_dns::api_root(&netbird.management_url, dns.api_url.as_deref())?;
+                if dns.zone_id.trim().is_empty() || !(1..=i32::MAX as u32).contains(&dns.ttl) {
+                    return Err(invalid("customDns requires zoneId and TTL between 1 and 2147483647"));
+                }
+                references.push(&dns.api_token_ref);
+            }
+            references
         }
         (None, Some(cloudflare)) => {
             if cloudflare.account_id.is_some() != cloudflare.api_token_ref.is_some() {
@@ -149,6 +157,9 @@ pub fn validate_service(service: &Service, class: &ClassSnapshot) -> Result<Serv
         return Err(invalid("invalid topology key"));
     }
     if class.spec.cloudflare.is_some() {
+        if annotations.contains_key(crate::netbird_dns::HOSTNAMES) {
+            return Err(invalid("custom DNS hostname declarations require a NetBird class"));
+        }
         crate::cloudflare::service_origin(service)?;
     } else {
         if ports

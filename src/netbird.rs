@@ -663,6 +663,7 @@ impl TunnelProvider for NetbirdConfig {
 
         crate::managed::patch_ingress(ctx, service, lb_ingress).await?;
 
+        crate::netbird_dns::reconcile(ctx, self, service, &observations).await?;
         if observations.incomplete() {
             return Err(Error::UnexpectedError(
                 "NetBird peer address discovery incomplete".into(),
@@ -672,6 +673,7 @@ impl TunnelProvider for NetbirdConfig {
     }
 
     async fn cleanup_service(&self, ctx: &ReconcileContext, _service: &Service) -> Result<()> {
+        crate::netbird_dns::cleanup(ctx).await?;
         crate::managed::cleanup_workloads(ctx).await?;
         crate::managed::cleanup_storage(ctx).await
     }

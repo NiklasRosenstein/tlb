@@ -44,6 +44,7 @@ These fields belong under `spec.netbird`.
 | ------------------------ | ------------------- | -------------------------------------- | -------------------------------------------------------------------------------------- |
 | `managementUrl`          | string              | Required                               | HTTP(S) management URL                                                                 |
 | `setupKeyRef`            | Secret reference    | Required                               | Reusable NetBird setup key                                                             |
+| `customDns`             | object              | Omitted                                | Optional custom-zone A-record reconciliation; fields below                              |
 | `netbirdDnsDomain`       | string              | `netbird.selfhosted`                   | Suffix for peer DNS names                                                              |
 | `image`                  | string              | `netbirdio/netbird:latest`             | Peer image with the required forwarding tools                                          |
 | `netbirdInterface`       | string              | `wt0`                                  | Interface used for peer-IP discovery and readiness                                     |
@@ -60,6 +61,25 @@ Resource prefixes use the same constraints as the Cloudflare prefix.
 
 `announceType: DNS` needs `tlb.io/dns`; without it, the provider falls back to IP announcement. See the
 [NetBird guide](../../guides/netbird/) for storage and peer requirements.
+
+### Custom-zone DNS fields
+
+These fields belong under `spec.netbird.customDns`.
+
+| Field | Default / requirement | Meaning |
+| --- | --- | --- |
+| `apiUrl` | `managementUrl` with `/api` appended | REST API root; trailing slashes are removed and management path prefixes are preserved |
+| `apiTokenRef` | Required | Secret holding a NetBird management API token with DNS read/create/update/delete permissions |
+| `zoneId` | Required | Existing custom-zone ID |
+| `ttl` | `60` | Record TTL in seconds, from 1 through 2,147,483,647 |
+
+The API URL must use HTTP(S) without embedded credentials, query strings, or fragments. For example,
+`https://netbird.example.com/` derives `https://netbird.example.com/api`; set `apiUrl` explicitly when the REST API is
+served elsewhere. Use one canonical API URL for each deployment.
+
+Services declare hostnames with `tlb.io/netbird-custom-dns-hostnames`. DNS API credentials remain in the controller's
+private journal and are not copied into tunnel Pods. DNS changes reconcile the new target before cleaning up previous
+targets; TTL and API-token changes do not restart peers. See [custom-zone DNS](../../guides/netbird/#custom-zone-dns).
 
 ## Secret references
 
@@ -79,8 +99,8 @@ setupKeyRef:
 For a `TunnelClass`, an explicit namespace must equal the class and Service namespace. A `ClusterTunnelClass` may
 reference another namespace. Empty credential values are rejected.
 
-Use `apiTokenRef` for Cloudflare and `setupKeyRef` for NetBird. These credentials are not Cloudflare connector tokens or
-NetBird management API tokens respectively.
+Use `apiTokenRef` for Cloudflare API access, `setupKeyRef` for NetBird enrollment, and `customDns.apiTokenRef` for
+NetBird DNS API access. Enrollment keys and DNS API tokens serve separate purposes.
 
 ## Updating a class
 

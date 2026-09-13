@@ -60,6 +60,7 @@ pub fn context(client: Client) -> ReconcileContext {
     }))
     .unwrap();
     ReconcileContext {
+        dns_lock: Default::default(),
         external_refresh: std::time::Duration::from_secs(300),
         events: SimpleEventRecorder::from_client(client.clone(), "test"),
         client,
@@ -78,6 +79,7 @@ pub fn context(client: Client) -> ReconcileContext {
                 credentials: Default::default(),
                 cleaning: false,
                 cloudflare: Default::default(),
+                netbird_dns: Default::default(),
             },
         },
     }

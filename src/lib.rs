@@ -13,6 +13,7 @@ pub mod crds;
 pub mod leadership;
 pub mod managed;
 pub mod netbird;
+pub mod netbird_dns;
 pub mod simpleevent;
 pub mod state;
 
@@ -22,6 +23,7 @@ pub const PROVIDER_LABEL: &str = "controller.tlb.io/provider";
 
 #[derive(Clone)]
 pub struct ReconcileContext {
+    pub dns_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
     pub external_refresh: std::time::Duration,
     pub client: Client,
     pub events: SimpleEventRecorder,
@@ -69,6 +71,9 @@ pub enum Error {
 
     #[error("Cloudflare Error: {0}")]
     CloudflareError(String),
+
+    #[error("NetBird DNS {reason}: {message}")]
+    NetbirdDnsError { reason: &'static str, message: String },
 
     #[error("cleanup is still in progress")]
     CleanupPending,
