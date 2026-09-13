@@ -36,9 +36,22 @@ use tokio::sync::Mutex;
 
 const SERVICE_FINALIZER: &str = "tlb.io/tunnel-cleanup";
 const CLASS_FINALIZER: &str = "tlb.io/finalizer";
-const RESYNC: Duration = Duration::from_secs(30);
+fn external_refresh(value: Option<&str>) -> Result<Duration> {
+    let seconds = value
+        .unwrap_or("300")
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v > 0)
+        .ok_or_else(|| Error::ConfigError("TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS must be a positive integer".into()))?;
+    let duration = Duration::from_secs(seconds);
+    if std::time::Instant::now().checked_add(duration).is_none() {
+        return Err(Error::ConfigError("external refresh interval is too large".into()));
+    }
+    Ok(duration)
+}
 
 struct Data {
+    external_refresh: Duration,
     client: kube::Client,
     namespace: String,
     events: SimpleEventRecorder,
@@ -68,6 +81,7 @@ impl Data {
     }
     fn context(&self, binding: Binding) -> ReconcileContext {
         ReconcileContext {
+            external_refresh: self.external_refresh,
             client: self.client.clone(),
             events: self.events.clone(),
             metadata: binding.data.class.metadata.clone(),
@@ -378,10 +392,10 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
                     ensure_no_legacy(&service, data).await?;
                     managed::set_finalizer(&api, &service, SERVICE_FINALIZER, false).await?;
                 }
-                return Ok(Action::requeue(RESYNC));
+                return Ok(Action::await_change());
             };
             if class.metadata.deletion_timestamp.is_some() {
-                return Ok(Action::requeue(RESYNC));
+                return Ok(Action::await_change());
             }
             validate_workload_inputs(&service, &class, data).await?;
             ensure_no_legacy(&service, data).await?;
@@ -427,11 +441,14 @@ async fn reconcile_service(service: &Service, data: &Data) -> Result<Action> {
         .unwrap()
         .insert(required_uid(&service.metadata)?.into(), binding.data.clone());
     let ctx = data.context(binding);
-    provider(&ctx.binding.data.class)?
+    let outcome = provider(&ctx.binding.data.class)?
         .reconcile_service(&ctx, &service)
         .await?;
     data.failures.write().unwrap().remove(required_uid(&service.metadata)?);
-    Ok(Action::requeue(RESYNC))
+    Ok(outcome
+        .requeue_after(data.external_refresh)
+        .map(Action::requeue)
+        .unwrap_or_else(Action::await_change))
 }
 
 async fn ensure_no_legacy(service: &Service, data: &Data) -> Result<()> {
@@ -496,7 +513,7 @@ async fn journal_reconcile(secret: Arc<Secret>, data: Arc<Data>) -> Result<Actio
         .get_opt(&binding.data.service.name_any())
         .await?;
     if service.as_ref().is_some_and(|s| s.uid().as_deref() == Some(&uid)) {
-        return Ok(Action::requeue(RESYNC));
+        return Ok(Action::await_change());
     }
     tokio::time::timeout(Duration::from_secs(120), cleanup(binding, &data))
         .await
@@ -565,7 +582,7 @@ async fn namespaced_class(class: Arc<TunnelClass>, data: Arc<Data>) -> Result<Ac
     } else {
         managed::set_finalizer(&api, &*class, CLASS_FINALIZER, true).await?;
     }
-    Ok(Action::requeue(RESYNC))
+    Ok(Action::await_change())
 }
 async fn cluster_class(class: Arc<ClusterTunnelClass>, data: Arc<Data>) -> Result<Action> {
     let api = Api::all(data.client.clone());
@@ -586,7 +603,7 @@ async fn cluster_class(class: Arc<ClusterTunnelClass>, data: Arc<Data>) -> Resul
     } else {
         managed::set_finalizer(&api, &*class, CLASS_FINALIZER, true).await?;
     }
-    Ok(Action::requeue(RESYNC))
+    Ok(Action::await_change())
 }
 
 fn retry<K: kube::Resource<DynamicType = ()>>(object: Arc<K>, error: &Error, data: Arc<Data>) -> Action {
@@ -619,7 +636,13 @@ fn affected_class(store: &Store<Service>, name: &str, namespace: Option<&str>) -
         .map(|s| ObjectRef::from_obj(&*s))
         .collect()
 }
-fn affected_secret(store: &Store<Service>, secret: &Secret, data: &Data) -> Vec<ObjectRef<Service>> {
+fn affected_secret(
+    store: &Store<Service>,
+    secret: &Secret,
+    data: &Data,
+    classes: &Store<TunnelClass>,
+    clusters: &Store<ClusterTunnelClass>,
+) -> Vec<ObjectRef<Service>> {
     if secret.namespace().as_deref() == Some(&data.namespace)
         && secret.labels().get(JOURNAL_LABEL).map(String::as_str) == Some("true")
     {
@@ -632,26 +655,75 @@ fn affected_secret(store: &Store<Service>, secret: &Secret, data: &Data) -> Vec<
         .state()
         .into_iter()
         .filter(|service| {
+            let owned = service.namespace() == secret.namespace()
+                && secret
+                    .owner_references()
+                    .iter()
+                    .any(|r| r.kind == "Service" && Some(&r.uid) == service.metadata.uid.as_ref());
             let tls = service.namespace() == secret.namespace()
                 && service.annotations().get("tlb.io/tls-secret-name") == Some(&secret.name_any());
-            let credentials = service.uid().and_then(|uid| bindings.get(&uid)).is_some_and(|b| {
-                let reference = b
-                    .class
-                    .spec
+            let class = class_name(service).and_then(|name| {
+                classes
+                    .get(&ObjectRef::new(name).within(service.namespace().as_deref().unwrap_or_default()))
+                    .map(|c| c.spec.inner.clone())
+                    .or_else(|| clusters.get(&ObjectRef::new(name)).map(|c| c.spec.inner.clone()))
+            });
+            let matches = |spec: &tlb::crds::TunnelClassInnerSpec| {
+                let reference = spec
                     .netbird
                     .as_ref()
                     .map(|c| &c.setup_key_ref)
-                    .or_else(|| b.class.spec.cloudflare.as_ref().and_then(|c| c.api_token_ref.as_ref()));
+                    .or_else(|| spec.cloudflare.as_ref().and_then(|c| c.api_token_ref.as_ref()));
                 reference.is_some_and(|r| {
                     r.name == secret.name_any()
-                        && r.namespace.as_ref().or(b.service.metadata.namespace.as_ref())
+                        && r.namespace.as_ref().or(service.metadata.namespace.as_ref())
                             == secret.metadata.namespace.as_ref()
                 })
-            });
-            tls || credentials
+            };
+            owned
+                || tls
+                || class.as_ref().is_some_and(matches)
+                || service
+                    .uid()
+                    .and_then(|uid| bindings.get(&uid))
+                    .is_some_and(|b| matches(&b.class.spec))
         })
         .map(|s| ObjectRef::from_obj(&*s))
         .collect()
+}
+
+fn affected_journals(store: &Store<Secret>, service: &Service) -> Vec<ObjectRef<Secret>> {
+    let mut refs = vec![];
+    if let Ok(name) = Binding::name(service) {
+        // The journal namespace is supplied by the caller.
+        refs.push(ObjectRef::new(&name));
+    }
+    refs.extend(
+        store
+            .state()
+            .iter()
+            .filter_map(|s| Binding::from_secret((**s).clone()).ok())
+            .filter(|b| {
+                b.data.service.namespace() == service.namespace() && b.data.service.name_any() == service.name_any()
+            })
+            .map(|b| ObjectRef::from_obj(&b.secret)),
+    );
+    refs
+}
+
+fn journal_class<K: kube::Resource<DynamicType = ()>>(secret: &Secret, namespaced: bool) -> Vec<ObjectRef<K>> {
+    Binding::from_secret(secret.clone())
+        .ok()
+        .filter(|b| b.data.class.namespaced == namespaced)
+        .map(|b| {
+            let reference = ObjectRef::new(b.data.class.metadata.name.as_deref().unwrap_or_default());
+            vec![if namespaced {
+                reference.within(b.data.class.metadata.namespace.as_deref().unwrap_or_default())
+            } else {
+                reference
+            }]
+        })
+        .unwrap_or_default()
 }
 
 fn controller_result<T, E: std::fmt::Display>(
@@ -671,6 +743,17 @@ fn controller_result<T, E: std::fmt::Display>(
 }
 
 async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
+    let class_controller = Controller::new(Api::<TunnelClass>::all(data.client.clone()), watcher::Config::default())
+        .with_config(Config::default().concurrency(4));
+    let class_cache = class_controller.store();
+    let cluster_controller = Controller::new(
+        Api::<ClusterTunnelClass>::all(data.client.clone()),
+        watcher::Config::default(),
+    )
+    .with_config(Config::default().concurrency(4));
+    let cluster_cache = cluster_controller.store();
+    let secret_classes = class_cache.clone();
+    let secret_clusters = cluster_cache.clone();
     let controller = Controller::new(Api::<Service>::all(data.client.clone()), watcher::Config::default())
         .with_config(Config::default().concurrency(16));
     let store = controller.store();
@@ -700,7 +783,7 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
         .watches(
             Api::<Secret>::all(data.client.clone()),
             watcher::Config::default(),
-            move |s| affected_secret(&secret_store, &s, &secret_data),
+            move |s| affected_secret(&secret_store, &s, &secret_data, &secret_classes, &secret_clusters),
         )
         .watches(
             Api::<Pod>::all(data.client.clone()),
@@ -724,24 +807,59 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
     )
     .with_config(Config::default().concurrency(16));
     let journal_cache = journal_controller.store();
+    let journal_store = journal_cache.clone();
+    let journal_namespace = data.namespace.clone();
     let journals = journal_controller
+        .watches(
+            Api::<Service>::all(data.client.clone()),
+            watcher::Config::default(),
+            move |service| {
+                affected_journals(&journal_store, &service)
+                    .into_iter()
+                    .map(|r| r.within(&journal_namespace))
+                    .collect::<Vec<_>>()
+            },
+        )
         .run(journal_reconcile, retry, data.clone())
         .map(controller_result)
         .try_for_each(|_| async { Ok(()) });
-    let class_controller = Controller::new(Api::<TunnelClass>::all(data.client.clone()), watcher::Config::default())
-        .with_config(Config::default().concurrency(4));
-    let class_cache = class_controller.store();
     let classes = class_controller
+        .watches(
+            data.journals(),
+            watcher::Config::default().labels(&format!("{JOURNAL_LABEL}=true")),
+            |s| journal_class::<TunnelClass>(&s, true),
+        )
+        .watches(
+            Api::<Service>::all(data.client.clone()),
+            watcher::Config::default(),
+            |s| {
+                class_name(&s)
+                    .map(|name| {
+                        ObjectRef::<TunnelClass>::new(name).within(s.namespace().as_deref().unwrap_or_default())
+                    })
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            },
+        )
         .run(namespaced_class, retry, data.clone())
         .map(controller_result)
         .try_for_each(|_| async { Ok(()) });
-    let cluster_controller = Controller::new(
-        Api::<ClusterTunnelClass>::all(data.client.clone()),
-        watcher::Config::default(),
-    )
-    .with_config(Config::default().concurrency(4));
-    let cluster_cache = cluster_controller.store();
     let clusters = cluster_controller
+        .watches(
+            data.journals(),
+            watcher::Config::default().labels(&format!("{JOURNAL_LABEL}=true")),
+            |s| journal_class::<ClusterTunnelClass>(&s, false),
+        )
+        .watches(
+            Api::<Service>::all(data.client.clone()),
+            watcher::Config::default(),
+            |s| {
+                class_name(&s)
+                    .map(ObjectRef::<ClusterTunnelClass>::new)
+                    .into_iter()
+                    .collect::<Vec<_>>()
+            },
+        )
         .run(cluster_class, retry, data)
         .map(controller_result)
         .try_for_each(|_| async { Ok(()) });
@@ -761,10 +879,11 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
     tokio::select! { _ = services => {}, _ = journals => {}, _ = classes => {}, _ = clusters => {}, _ = readiness => {} }
 }
 
-pub async fn run(_reconcile_interval: Duration) -> Result<()> {
+pub async fn run() -> Result<()> {
     let namespace = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "tlb-system".into());
     let client = kube::Client::try_default().await?;
     let data = Arc::new(Data {
+        external_refresh: external_refresh(std::env::var("TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS").ok().as_deref())?,
         events: SimpleEventRecorder::from_client(client.clone(), "tlb-controller"),
         client: client.clone(),
         namespace: namespace.clone(),
@@ -918,6 +1037,7 @@ mod tests {
                 "default",
             );
             let data = Arc::new(Data {
+                external_refresh: Duration::from_secs(300),
                 events: SimpleEventRecorder::from_client(client.clone(), "test"),
                 client,
                 namespace: "tlb-system".into(),
@@ -930,6 +1050,54 @@ mod tests {
             assert!(error.to_string().contains("Cloudflare accepts one port mapping"));
             assert_eq!(requests.lock().unwrap().len(), 4);
         }
+    }
+
+    #[test]
+    fn scheduling_has_no_blanket_resync() {
+        use tlb::ReconcileOutcome::*;
+        let refresh = external_refresh(None).unwrap();
+        assert_eq!(refresh, Duration::from_secs(300));
+        assert_eq!(Settled.requeue_after(refresh), None);
+        assert_eq!(DiscoveryPending.requeue_after(refresh), Some(Duration::from_secs(5)));
+        assert_eq!(ExternalRefresh.requeue_after(refresh), Some(refresh));
+        assert_eq!(external_refresh(Some("60")).unwrap(), Duration::from_secs(60));
+        for invalid in ["0", "-1", "", "abc", "18446744073709551615"] {
+            assert!(external_refresh(Some(invalid)).is_err());
+        }
+    }
+
+    #[test]
+    fn service_recreation_wakes_both_journals_and_journal_deletion_wakes_class() {
+        use kube::runtime::reflector::store::Writer;
+        let mut binding = Binding {
+            secret: serde_json::from_value(json!({"metadata":{"name":"tlb-service-uid","namespace":"tlb-system","uid":"binding-uid"}})).unwrap(),
+            data: serde_json::from_value(json!({
+                "service":{"metadata":{"name":"api","namespace":"apps","uid":"service-uid"}},
+                "class":{"metadata":{"name":"public","namespace":"apps","uid":"class-uid"},"namespaced":true,"spec":{"netbird":{"managementUrl":"https://example.com","setupKeyRef":{"name":"key","key":"key"}}}},
+                "credentials":{}
+            })).unwrap(),
+        };
+        binding.secret.metadata.labels = Some(BTreeMap::from([
+            (JOURNAL_LABEL.into(), "true".into()),
+            (SERVICE_UID_LABEL.into(), "service-uid".into()),
+            (CLASS_UID_LABEL.into(), "class-uid".into()),
+        ]));
+        binding.secret.data = Some(BTreeMap::from([(
+            "binding.json".into(),
+            k8s_openapi::ByteString(serde_json::to_vec(&binding.data).unwrap()),
+        )]));
+        let mut writer = Writer::<Secret>::default();
+        writer.apply_watcher_event(&watcher::Event::Apply(binding.secret.clone()));
+        let mut recreated = binding.data.service.clone();
+        recreated.metadata.uid = Some("new-uid".into());
+        let refs = affected_journals(&writer.as_reader(), &recreated);
+        assert!(refs.iter().any(|r| r.name == "tlb-service-uid"));
+        assert!(refs.iter().any(|r| r.name == "tlb-new-uid"));
+        assert_eq!(
+            journal_class::<TunnelClass>(&binding.secret, true),
+            vec![ObjectRef::new("public").within("apps")]
+        );
+        assert!(journal_class::<ClusterTunnelClass>(&binding.secret, false).is_empty());
     }
 
     fn class() -> ClassSnapshot {

@@ -495,7 +495,8 @@ fn extract_url_from_log_line(line: &str) -> Option<String> {
     })
 }
 
-async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Result<Vec<String>> {
+async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Result<(Vec<String>, bool)> {
+    let mut pending = false;
     let namespace = binding
         .data
         .service
@@ -535,21 +536,24 @@ async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Resul
                     if ready {
                         announced.push(hostname);
                     }
+                } else {
+                    pending = true;
                 }
             }
-            Err(err) => log::warn!("cannot discover quick tunnel for {namespace}/{}: {err}", pod.name_any()),
+            Err(err) => return Err(err.into()),
         }
     }
     if current != binding.data.cloudflare.quick_urls {
         binding.data.cloudflare.quick_urls = current;
         binding.save(ctx.client.clone()).await?;
     }
-    Ok(announced)
+    Ok((announced, pending))
 }
 
 #[async_trait]
 impl TunnelProvider for CloudflareConfig {
-    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<()> {
+    async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<crate::ReconcileOutcome> {
+        let mut discovery_pending = false;
         let options = crate::config::validate_service(service, &ctx.binding.data.class)?;
         let namespace = service
             .namespace()
@@ -719,7 +723,7 @@ impl TunnelProvider for CloudflareConfig {
         )
         .await?;
         if self.api_token_ref.is_none() {
-            hostnames = quick_hostnames(ctx, &mut binding).await?;
+            (hostnames, discovery_pending) = quick_hostnames(ctx, &mut binding).await?;
         }
         crate::managed::patch_ingress(
             ctx,
@@ -736,7 +740,13 @@ impl TunnelProvider for CloudflareConfig {
         if let Some(error) = dns_error {
             return Err(error);
         }
-        Ok(())
+        Ok(if discovery_pending {
+            crate::ReconcileOutcome::DiscoveryPending
+        } else if self.api_token_ref.is_some() {
+            crate::ReconcileOutcome::ExternalRefresh
+        } else {
+            crate::ReconcileOutcome::Settled
+        })
     }
 
     async fn cleanup_service(&self, ctx: &ReconcileContext, _service: &Service) -> Result<()> {
@@ -934,6 +944,37 @@ mod tests {
         (api, task)
     }
 
+    #[tokio::test]
+    async fn running_connector_without_url_requests_discovery_retry() {
+        use crate::test_support::Exchange;
+        let pod = json!({"metadata":{"uid":"pod-uid","name":"pod"},"status":{
+            "containerStatuses":[{"name":"cloudflared","image":"image","imageID":"id","ready":true,
+                "restartCount":0,"containerID":"container-1","state":{"running":{}}}]
+        }});
+        let (client, requests) = mock(vec![
+            Exchange {
+                method: "GET",
+                path: "/api/v1/namespaces/apps/pods",
+                status: 200,
+                response: json!({"items":[pod]}),
+                check: |_| {},
+            },
+            Exchange {
+                method: "GET",
+                path: "/api/v1/namespaces/apps/pods/pod/log",
+                status: 200,
+                response: json!("connector starting"),
+                check: |_| {},
+            },
+        ]);
+        let ctx = context(client);
+        assert_eq!(
+            quick_hostnames(&ctx, &mut ctx.binding.clone()).await.unwrap(),
+            (vec![], true)
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn invalid_api_token_is_an_error_not_a_panic() {
         assert!(CloudflareApi::new("token\nInjected: bad", "account").is_err());
@@ -1071,7 +1112,7 @@ mod tests {
             .cloudflare
             .quick_urls
             .insert("pod-uid:0:container-1".into(), "known.trycloudflare.com".into());
-        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().is_empty());
+        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().0.is_empty());
         assert_eq!(binding.data.cloudflare.quick_urls.len(), 1);
         assert!(requests.lock().unwrap().is_empty());
     }
@@ -1126,10 +1167,10 @@ mod tests {
         ]);
         let ctx = context(client);
         let mut binding = ctx.binding.clone();
-        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().is_empty());
+        assert!(quick_hostnames(&ctx, &mut binding).await.unwrap().0.is_empty());
         binding.data = serde_json::from_slice(&serde_json::to_vec(&binding.data).unwrap()).unwrap();
         assert_eq!(
-            quick_hostnames(&ctx, &mut binding).await.unwrap(),
+            quick_hostnames(&ctx, &mut binding).await.unwrap().0,
             vec!["early.trycloudflare.com"]
         );
         assert!(requests.lock().unwrap().is_empty());
@@ -1197,7 +1238,7 @@ mod tests {
                 .quick_urls
                 .insert("deleted-pod:0:gone".into(), "gone.trycloudflare.com".into());
             assert_eq!(
-                quick_hostnames(&ctx, &mut binding).await.unwrap(),
+                quick_hostnames(&ctx, &mut binding).await.unwrap().0,
                 vec!["fresh.trycloudflare.com"]
             );
             assert_eq!(
@@ -1206,7 +1247,7 @@ mod tests {
             );
             binding.data = serde_json::from_slice(&serde_json::to_vec(&binding.data).unwrap()).unwrap();
             assert_eq!(
-                quick_hostnames(&ctx, &mut binding).await.unwrap(),
+                quick_hostnames(&ctx, &mut binding).await.unwrap().0,
                 vec!["fresh.trycloudflare.com"]
             );
             assert!(requests.lock().unwrap().is_empty());
