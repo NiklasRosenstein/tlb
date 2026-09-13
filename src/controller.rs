@@ -2,6 +2,7 @@ use futures::{StreamExt, TryStreamExt};
 use k8s_openapi::api::{
     apps::v1::{Deployment, StatefulSet},
     core::v1::{ConfigMap, PersistentVolumeClaim, Pod, Secret, Service},
+    networking::v1::Ingress,
 };
 use kube::{
     Api, Resource, ResourceExt,
@@ -773,9 +774,22 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
     let class_store = store.clone();
     let cluster_store = store.clone();
     let pod_store = store.clone();
+    let ingress_store = store.clone();
     let secret_store = store.clone();
     let secret_data = data.clone();
     let controller = controller
+        .watches(
+            Api::<Ingress>::all(data.client.clone()),
+            watcher::Config::default(),
+            move |ingress| {
+                ingress_store
+                    .state()
+                    .into_iter()
+                    .filter(|service| tlb::netbird_ingress::affected(service, &ingress))
+                    .map(|service| ObjectRef::from_obj(&*service))
+                    .collect::<Vec<_>>()
+            },
+        )
         .owns(Api::<Deployment>::all(data.client.clone()), watcher::Config::default())
         .owns(Api::<StatefulSet>::all(data.client.clone()), watcher::Config::default())
         .owns(Api::<ConfigMap>::all(data.client.clone()), watcher::Config::default())

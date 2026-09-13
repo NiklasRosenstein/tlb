@@ -77,7 +77,8 @@ The API URL must use HTTP(S) without embedded credentials, query strings, or fra
 `https://netbird.example.com/` derives `https://netbird.example.com/api`; set `apiUrl` explicitly when the REST API is
 served elsewhere. Use one canonical API URL for each deployment.
 
-Services declare hostnames with `tlb.io/netbird-custom-dns-hostnames`. DNS API credentials remain in the controller's
+Services declare hostnames with `tlb.io/netbird-custom-dns-hostnames` or discover them through an explicit
+`tlb.io/netbird-custom-dns-ingress-class` association. DNS API credentials remain in the controller's
 private journal and are not copied into tunnel Pods. DNS changes reconcile the new target before cleaning up previous
 targets; TTL and API-token changes do not restart peers. See [custom-zone DNS](../../guides/netbird/#custom-zone-dns).
 

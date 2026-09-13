@@ -137,8 +137,8 @@ metadata:
     tlb.io/replicas: "2"
 ```
 
-For an ingress Service, Traefik handles HTTP routing and TLS. Hostnames must be declared explicitly; TLB does not inspect
-Ingress or Gateway routes. `tlb.io/dns` configures peer aliases independently of these custom-zone names.
+For an ingress Service, Traefik handles HTTP routing and TLS. TLB can discover hostnames from associated Kubernetes
+Ingresses as described below. `tlb.io/dns` configures peer aliases independently of custom-zone names.
 
 Each declaration reserves the complete A-record set at that exact hostname for this Service. TLB adopts existing A
 records, repairs TTLs, and removes stale addresses. AAAA/CNAME records cause a conflict and remain untouched. Other
@@ -161,6 +161,74 @@ tearing down tunnel workloads; restore API access if cleanup is blocked. Revoked
 snapshot: restore a valid token at the retained Secret reference. Removing `customDns` while declarations remain also
 reports invalid configuration.
 
+### Discover hostnames from Ingresses
+
+Associate the tunnel Service with the IngressClass handled by its ingress controller:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: private-ingress
+  namespace: traefik
+  annotations:
+    tlb.io/netbird-custom-dns-ingress-class: private
+    tlb.io/netbird-custom-dns-ingress-namespaces: "apps,monitoring"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: tlb.io/private
+  selector:
+    app.kubernetes.io/name: traefik
+  ports:
+    - name: websecure
+      port: 443
+      targetPort: websecure
+```
+
+Configure `customDns` on the selected tunnel class. The association is explicit: TLB does not infer which ingress
+controller is behind a Service from Pod labels or backend references. The class must correspond to that controller's
+configuration. Without the namespaces annotation, discovery is limited to the Service's namespace. Use a comma-separated
+namespace allowlist or `"*"` for all namespaces served by that controller.
+
+An Ingress such as this contributes its hostname to the tunnel Service's DNS records:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grafana
+  namespace: monitoring
+spec:
+  ingressClassName: private
+  rules:
+    - host: grafana.private.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+```
+
+TLB selects `spec.ingressClassName` and concrete `spec.rules[].host` values within the configured NetBird zone. It ignores
+hostless rules, wildcard hosts, TLS-only host entries, terminating Ingresses, names outside the zone, and Ingresses with
+no explicit class reference. The deprecated `kubernetes.io/ingress.class` controller-name annotation is not used as a
+class reference. Configure `spec.ingressClassName` on each contributing Ingress. TLB does not require a populated Ingress
+load-balancer status; the configured association determines which rules contribute DNS names. Gateway API routes and
+controller-specific route CRDs are not discovered.
+
+Discovered names and `tlb.io/netbird-custom-dns-hostnames` form a union. A name remains reserved while any selected
+Ingress or explicit declaration requests it. Changes to Ingress rules or classes, deletion, and changes to the namespace
+scope reconcile that union through watches. Discovered names are not written into the explicit-hostname annotation.
+All A-record ownership rules above also apply to discovered names.
+
+If an Ingress list fails, TLB reports `IngressDiscoveryFailed` and preserves DNS records until a complete listing succeeds.
+Removing the class association and namespace selection disables discovery and cleans up names without an explicit
+source. The Helm chart grants read-only `get`, `list`, and `watch` access to `networking.k8s.io/ingresses`.
+
 ### Verify custom DNS
 
 Use a disposable cluster and dedicated NetBird zones, with the controller running as the chart's ServiceAccount.
@@ -175,6 +243,10 @@ Use a disposable cluster and dedicated NetBird zones, with the controller runnin
 5. Rotate the API token Secret and confirm DNS reconciliation succeeds without a tunnel Pod restart.
 6. Delete the Service and confirm its reserved A records disappear while an unrelated test record remains. Check that
    Service and journal finalizers complete. Resolution checks must allow for record TTLs and NetBird propagation.
+
+To verify discovery in the dedicated environment, create two selected Ingresses sharing a concrete hostname. Confirm
+that deleting one preserves the A records and deleting the last removes them. Repeat with an explicit declaration of
+the same name, then change an Ingress to a different class and confirm only the selected class contributes names.
 
 ## Pod DNS resolution
 

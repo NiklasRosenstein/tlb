@@ -27,7 +27,7 @@ disposable cluster for development.
 
 ## Reconciliation
 
-Services are the unit of work. The controller watches Services, classes, Secrets, tunnel workloads, and Pods, and
+Services are the unit of work. The controller watches Services, classes, Secrets, tunnel workloads, Pods, and Ingresses, and
 refreshes external state every five minutes by default. Settled classes, journals, and Quick Tunnels wait for watch
 events. Running Quick Tunnels awaiting a URL retry after five seconds; failed API and peer-address reads use bounded
 error retries. Journal and Service events drive class and orphan cleanup.

@@ -21,6 +21,9 @@ struct Kubernetes {
     token: Option<String>,
     fail_id_save: bool,
     writes: usize,
+    ingresses: Vec<k8s_openapi::api::networking::v1::Ingress>,
+    ingress_errors: BTreeSet<String>,
+    ingress_lists: Vec<String>,
 }
 struct Harness {
     base: ReconcileContext,
@@ -173,6 +176,9 @@ impl Harness {
             token: Some("secret-token".into()),
             fail_id_save: false,
             writes: 0,
+            ingresses: vec![],
+            ingress_errors: BTreeSet::new(),
+            ingress_lists: vec![],
         }));
         let state = kube.clone();
         base.client = kube::Client::new(
@@ -190,6 +196,25 @@ impl Harness {
                     let mut state = state.lock().unwrap();
                     let mut status = 200;
                     let response = match (method.as_str(), path.as_str()) {
+                        ("GET", path)
+                            if path.starts_with("/apis/networking.k8s.io/v1/") && path.ends_with("/ingresses") =>
+                        {
+                            state.ingress_lists.push(path.to_owned());
+                            let namespace = path
+                                .strip_prefix("/apis/networking.k8s.io/v1/namespaces/")
+                                .and_then(|p| p.strip_suffix("/ingresses"));
+                            if state.ingress_errors.contains(namespace.unwrap_or("*")) {
+                                status = 403;
+                                json!({"kind":"Status","status":"Failure","reason":"Forbidden","code":403,"message":"denied"})
+                            } else {
+                                let items: Vec<_> = state
+                                    .ingresses
+                                    .iter()
+                                    .filter(|i| namespace.is_none_or(|ns| i.namespace().as_deref() == Some(ns)))
+                                    .collect();
+                                json!({"items":items})
+                            }
+                        }
                         ("GET", "/api/v1/namespaces/apps/secrets/dns-token") => match &state.token {
                             Some(token) => {
                                 json!({"data":{"token":base64::Engine::encode(&base64::engine::general_purpose::STANDARD,token)}})
@@ -739,4 +764,177 @@ async fn cleanup_removes_failure_condition_even_when_no_records_were_provisioned
             .is_empty()
     );
     assert_eq!(h.mutations(), 0);
+}
+
+fn ingress_route(name: &str, namespace: &str, class: &str, host: &str) -> k8s_openapi::api::networking::v1::Ingress {
+    serde_json::from_value(json!({"metadata":{"name":name,"namespace":namespace},
+        "spec":{"ingressClassName":class,"rules":[{"host":host}]}}))
+    .unwrap()
+}
+fn discovery_context(h: &Harness, explicit: bool) -> ReconcileContext {
+    let mut ctx = h.ctx();
+    let annotations = ctx.binding.data.service.metadata.annotations.as_mut().unwrap();
+    annotations.insert(crate::netbird_ingress::CLASS.into(), "private".into());
+    if !explicit {
+        annotations.remove(HOSTNAMES);
+    }
+    ctx
+}
+
+#[tokio::test]
+async fn ingress_creation_class_changes_and_last_source_removal_reconcile_dns() {
+    let h = Harness::new().await;
+    let route = ingress_route("route", "apps", "private", "route.private.example.com");
+    h.kube.lock().unwrap().ingresses.push(route.clone());
+    h.run(&discovery_context(&h, false), peers(&[("p", Some("100.64.0.1"))]))
+        .await
+        .unwrap();
+    assert_eq!(h.records("zone")[0]["name"], "route.private.example.com");
+    assert!(!h.ctx().binding.data.service.annotations().contains_key(HOSTNAMES));
+    h.kube.lock().unwrap().ingresses[0]
+        .spec
+        .as_mut()
+        .unwrap()
+        .ingress_class_name = Some("public".into());
+    h.run(&h.ctx(), peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert!(h.records("zone").is_empty());
+    let mut duplicate = route.clone();
+    duplicate.metadata.name = Some("duplicate".into());
+    h.kube.lock().unwrap().ingresses = vec![route, duplicate];
+    h.run(&h.ctx(), peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    let mutations = h.mutations();
+    h.kube.lock().unwrap().ingresses.pop();
+    h.run(&h.ctx(), peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert_eq!(h.records("zone").len(), 1);
+    assert_eq!(h.mutations(), mutations);
+    h.kube.lock().unwrap().ingresses.clear();
+    h.run(&h.ctx(), peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert!(h.records("zone").is_empty());
+    assert!(h.ctx().binding.data.netbird_dns.targets.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_and_discovered_names_are_a_union_and_disabling_discovery_preserves_explicit_names() {
+    let h = Harness::new().await;
+    h.kube.lock().unwrap().ingresses = vec![
+        ingress_route("shared", "apps", "private", "app.private.example.com"),
+        ingress_route("only-ingress", "apps", "private", "route.private.example.com"),
+    ];
+    h.run(&discovery_context(&h, true), peers(&[("p", Some("100.64.0.1"))]))
+        .await
+        .unwrap();
+    assert_eq!(h.records("zone").len(), 2);
+    let mutations = h.mutations();
+    let mut ctx = h.ctx();
+    ctx.binding
+        .data
+        .service
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .remove(HOSTNAMES);
+    h.run(&ctx, peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert_eq!(h.records("zone").len(), 2);
+    assert_eq!(h.mutations(), mutations);
+    let mut ctx = h.ctx();
+    let annotations = ctx.binding.data.service.metadata.annotations.as_mut().unwrap();
+    annotations.insert(HOSTNAMES.into(), "app.private.example.com".into());
+    annotations.remove(crate::netbird_ingress::CLASS);
+    let lists = h.kube.lock().unwrap().ingress_lists.len();
+    h.run(&ctx, peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert_eq!(h.records("zone").len(), 1);
+    assert_eq!(h.records("zone")[0]["name"], "app.private.example.com");
+    assert_eq!(h.kube.lock().unwrap().ingress_lists.len(), lists);
+}
+
+#[tokio::test]
+async fn namespace_scoping_and_failed_partial_lists_preserve_records() {
+    let h = Harness::new().await;
+    h.kube.lock().unwrap().ingresses = vec![
+        ingress_route("apps", "apps", "private", "app.private.example.com"),
+        ingress_route("other", "other", "private", "other.private.example.com"),
+        ingress_route("outside", "apps", "private", "outside.example.com"),
+    ];
+    let mut ctx = discovery_context(&h, false);
+    ctx.binding
+        .data
+        .service
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .insert(crate::netbird_ingress::NAMESPACES.into(), "apps,other".into());
+    h.run(&ctx, peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert_eq!(h.records("zone").len(), 2);
+    let mutations = h.mutations();
+    h.kube.lock().unwrap().ingress_errors.insert("other".into());
+    h.kube.lock().unwrap().ingresses.clear();
+    assert!(matches!(
+        h.run(&h.ctx(), peers(&[])).await,
+        Err(Error::NetbirdDnsError {
+            reason: "IngressDiscoveryFailed",
+            ..
+        })
+    ));
+    assert_eq!(h.records("zone").len(), 2);
+    assert_eq!(h.mutations(), mutations);
+    h.kube.lock().unwrap().ingress_errors.clear();
+    h.kube.lock().unwrap().ingresses = vec![ingress_route("other", "other", "private", "other.private.example.com")];
+    let mut ctx = h.ctx();
+    ctx.binding
+        .data
+        .service
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .insert(crate::netbird_ingress::NAMESPACES.into(), "*".into());
+    h.run(&ctx, peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert_eq!(h.records("zone").len(), 1);
+    assert_eq!(
+        h.kube.lock().unwrap().ingress_lists.last().unwrap(),
+        "/apis/networking.k8s.io/v1/ingresses"
+    );
+    let mut ctx = h.ctx();
+    ctx.binding
+        .data
+        .service
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .remove(crate::netbird_ingress::NAMESPACES);
+    h.run(&ctx, peers(&[("p", Some("100.64.0.1"))])).await.unwrap();
+    assert!(h.records("zone").is_empty());
+}
+
+#[tokio::test]
+async fn discovery_requires_dns_configuration_and_cleans_up_when_it_is_removed() {
+    let h = Harness::new().await;
+    let mut ctx = discovery_context(&h, false);
+    ctx.binding.data.class.spec.netbird.as_mut().unwrap().custom_dns = None;
+    assert!(matches!(
+        h.run(&ctx, peers(&[])).await,
+        Err(Error::NetbirdDnsError {
+            reason: "InvalidConfiguration",
+            ..
+        })
+    ));
+    assert!(h.kube.lock().unwrap().ingress_lists.is_empty());
+    h.kube.lock().unwrap().ingresses = vec![ingress_route("route", "apps", "private", "route.private.example.com")];
+    h.run(&discovery_context(&h, false), peers(&[("p", Some("100.64.0.1"))]))
+        .await
+        .unwrap();
+    let mut ctx = h.ctx();
+    ctx.binding.data.class.spec.netbird.as_mut().unwrap().custom_dns = None;
+    h.kube.lock().unwrap().ingress_errors.insert("apps".into());
+    assert!(matches!(
+        h.run(&ctx, peers(&[])).await,
+        Err(Error::NetbirdDnsError {
+            reason: "InvalidConfiguration",
+            ..
+        })
+    ));
+    assert!(h.records("zone").is_empty());
 }

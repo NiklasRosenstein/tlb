@@ -23,8 +23,8 @@ mise run update-crds
 
 ## Kubernetes lifecycle tests
 
-The isolated suite builds a controller image, creates a dedicated kind cluster, installs the chart, and verifies
-lifecycle and deployment behavior. It requires Docker, kind, Helm, kubectl, Python 3, and `timeout`:
+The isolated suite builds a controller image, creates a dedicated kind cluster with two schedulable nodes, installs the chart, and verifies
+lifecycle, NetBird DNS discovery, and deployment behavior. It requires Docker, kind, Helm, kubectl, Python 3, and `timeout`:
 
 ```bash
 bash tests/kubernetes.sh
@@ -37,11 +37,20 @@ For an existing **test** cluster named `tlb-audit`, run the suites directly:
 
 ```bash
 python3 tests/kubernetes.py --kubeconfig /path/to/test-kubeconfig
+python3 tests/kubernetes_netbird.py --kubeconfig /path/to/test-kubeconfig
 python3 tests/kubernetes_deployment.py --kubeconfig /path/to/test-kubeconfig
 ```
 
-These tests create and delete resources, terminate a test controller Pod, and temporarily remove a test CRD. They are
-not production-cluster checks. Provider API tests use local mocks; public traffic needs provider integration validation.
+The NetBird suite requires the `tlb-netbird-test:audit` image from `tests/netbird/Dockerfile` loaded into kind and the
+chart's `externalRefreshIntervalSeconds` set to `7200`. The shell runner configures both. It runs a stateful DNS API
+double and peer Pods with dummy interfaces through TLB's generated launch script and readiness probe. Tests exercise
+Ingress watches, hostname selection and ownership, peer readiness and scaling, API and Kubernetes listing failures,
+leader failover, and finalizer cleanup. Ingress watch assertions follow an idle period and complete within 45 seconds, well
+before the external refresh. Real NetBird enrollment, DNS distribution to clients, tunnel traffic, and TLS require a
+separate provider integration environment.
+
+These tests create and delete resources, terminate test controller Pods, temporarily revoke Ingress list permission,
+and temporarily remove a test CRD. They are not production-cluster checks.
 
 ## Public Quick Tunnel E2E
 
