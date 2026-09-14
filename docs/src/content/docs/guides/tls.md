@@ -27,7 +27,8 @@ port `15411`. If you specify mappings, they replace the default one-to-one port 
 
 ## Terminate TLS on the peer
 
-Create the certificate Secret in the **same namespace as the Service**:
+Create the certificate Secret in the **same namespace as the Service**. TLB copies `tls.crt` and `tls.key` into a
+managed Secret beside the tunnel Pod, rotates Pods on data updates, and removes the copy when its binding is cleaned up:
 
 ```bash
 kubectl -n apps create secret tls website-tls \

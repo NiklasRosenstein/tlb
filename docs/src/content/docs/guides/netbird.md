@@ -32,7 +32,7 @@ spec:
 Use the field name **`managementUrl`**, including that capitalization.
 
 For a shared class, use `ClusterTunnelClass` and set the setup key reference's `namespace`. TLB copies the setup key
-into a managed Secret in each Service namespace; the tunnel workloads still run beside the Service.
+into a managed Secret in the configured workload namespace. The tunnel workloads default to `kube-system`.
 
 ## Expose a Service
 
@@ -227,11 +227,11 @@ All A-record ownership rules above also apply to discovered names.
 
 If an Ingress list fails, TLB reports `IngressDiscoveryFailed` and preserves DNS records until a complete listing succeeds.
 Removing the class association and namespace selection disables discovery and cleans up names without an explicit
-source. The Helm chart grants read-only `get`, `list`, and `watch` access to `networking.k8s.io/ingresses`.
+source. The installation manifest grants read-only `get`, `list`, and `watch` access to `networking.k8s.io/ingresses`.
 
 ### Verify custom DNS
 
-Use a disposable cluster and dedicated NetBird zones, with the controller running as the chart's ServiceAccount.
+Use a disposable cluster and dedicated NetBird zones, with the controller running as the installation’s ServiceAccount.
 
 1. Configure a zone and allowed client group, then expose a test Service with two replicas and two hostnames.
 2. Wait for `tlb.io/CustomDNSReady=True`. On a client in the distribution group, resolve both names and compare their
@@ -262,7 +262,8 @@ See [NetBird DNS settings](https://docs.netbird.io/manage/dns/dns-settings).
 ## Pod requirements
 
 NetBird Pods require network capabilities, including `NET_ADMIN`. The class enables `SYS_ADMIN` and `SYS_RESOURCE` for
-eBPF by default; `enableEbpfCapabilities: false` omits those two additions. Your admission policy must allow the
+eBPF only when `enableEbpfCapabilities: true` and the controller unsafe-workload opt-in are enabled. The default
+requests only the additional `NET_ADMIN` capability and disables the eBPF WireGuard proxy. Your admission policy must allow the
 resulting Pod.
 
 The image must support the configured NetBird command, shell, `ip`, and BusyBox-compatible `nc`. Forwarding uses

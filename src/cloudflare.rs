@@ -497,11 +497,7 @@ fn extract_url_from_log_line(line: &str) -> Option<String> {
 
 async fn quick_hostnames(ctx: &ReconcileContext, binding: &mut Binding) -> Result<(Vec<String>, bool)> {
     let mut pending = false;
-    let namespace = binding
-        .data
-        .service
-        .namespace()
-        .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+    let namespace = binding.data.workload_namespace.clone();
     let api: Api<Pod> = Api::namespaced(ctx.client.clone(), &namespace);
     let pods = api.list(&ListParams::default().labels(&ctx.selector()?)).await?;
     let mut current = BTreeMap::new();
@@ -555,9 +551,7 @@ impl TunnelProvider for CloudflareConfig {
     async fn reconcile_service(&self, ctx: &ReconcileContext, service: &Service) -> Result<crate::ReconcileOutcome> {
         let mut discovery_pending = false;
         let options = crate::config::validate_service(service, &ctx.binding.data.class)?;
-        let namespace = service
-            .namespace()
-            .ok_or_else(|| Error::ConfigError("Service namespace missing".into()))?;
+        let namespace = ctx.binding.data.workload_namespace.clone();
         let origin = service_origin(service)?;
         let mut binding = ctx.binding.clone();
         let resource_name = ctx.resource_name(self.resource_prefix.as_deref().unwrap_or("cf-"), "")?;

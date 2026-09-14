@@ -4,8 +4,8 @@ function fixture() {
   return new Map([
     ["Cargo.toml", '[package]\nname = "tlb"\nversion = "0.6.5"\n'],
     ["Cargo.lock", '[[package]]\nname = "dep"\nversion = "1.2.3"\n\n[[package]]\nname = "tlb"\nversion = "0.6.5"\n'],
-    ["helm/tlb-controller/Chart.yaml", 'version: "0.6.5"\nappVersion: "0.6.5"\n'],
-    ["helm/tlb-controller/values.yaml", 'image:\n  tag: "0.6.5"\n'],
+    ["deploy/controller.yaml", 'image: "ghcr.io/niklasrosenstein/tlb:0.6.5"\n'],
+    ["deploy/tlb.yaml", 'image: "ghcr.io/niklasrosenstein/tlb:0.6.5"\n'],
   ]);
 }
 function assert(condition: boolean) {
@@ -16,14 +16,14 @@ Deno.test("release preserves dependency versions and input files", () => {
   const prepared = prepareRelease(files, "0.7.0");
   assert(prepared.get("Cargo.lock")!.includes('name = "dep"\nversion = "1.2.3"'));
   assert(prepared.get("Cargo.lock")!.includes('name = "tlb"\nversion = "0.7.0"'));
-  assert(prepared.get("helm/tlb-controller/Chart.yaml") === 'version: "0.7.0"\nappVersion: "0.7.0"\n');
-  assert(prepared.get("helm/tlb-controller/values.yaml") === 'image:\n  tag: "0.7.0"\n');
+  assert(prepared.get("deploy/controller.yaml") === 'image: "ghcr.io/niklasrosenstein/tlb:0.7.0"\n');
+  assert(prepared.get("deploy/tlb.yaml") === 'image: "ghcr.io/niklasrosenstein/tlb:0.7.0"\n');
   assert(files.get("Cargo.toml")!.includes('version = "0.6.5"'));
 });
 Deno.test("invalid, repeated, missing and inconsistent versions fail before writes", async () => {
   for (const version of ["bad", "01.2.3", "0.6.5", "0.7.0"]) {
     const files = fixture();
-    if (version === "0.7.0") files.set("helm/tlb-controller/Chart.yaml", 'version: "0.5.0"\n');
+    if (version === "0.7.0") files.set("deploy/controller.yaml", 'image: "ghcr.io/niklasrosenstein/tlb:0.5.0"\n');
     let writes = 0;
     let failed = false;
     try {

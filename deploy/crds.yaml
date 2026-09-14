@@ -52,7 +52,9 @@ spec:
                     - name
                     type: object
                   image:
-                    description: The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                    description: |-
+                      The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                      An explicit value requires the controller unsafe-workload opt-in.
                     nullable: true
                     type: string
                   resourcePrefix:
@@ -132,14 +134,14 @@ spec:
                   enableEbpfCapabilities:
                     description: |-
                       Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
-                      When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                      Requires the controller unsafe-workload opt-in. Defaults to `false`.
                     nullable: true
                     type: boolean
                   image:
                     description: |-
-                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
-                      must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
-                      controller.
+                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
+                      An explicit value requires the controller unsafe-workload opt-in. The image must have
+                      BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
                     nullable: true
                     type: string
                   managementUrl:
@@ -190,7 +192,8 @@ spec:
                     type: string
                   upCommand:
                     description: |-
-                      The command to run alias to `netbird up` in the container. Defaults to
+                      The command to run alias to `netbird up` in the container. An explicit value requires
+                      the controller unsafe-workload opt-in. Defaults to
                       [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string
@@ -259,7 +262,9 @@ spec:
                     - name
                     type: object
                   image:
-                    description: The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                    description: |-
+                      The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+                      An explicit value requires the controller unsafe-workload opt-in.
                     nullable: true
                     type: string
                   resourcePrefix:
@@ -339,14 +344,14 @@ spec:
                   enableEbpfCapabilities:
                     description: |-
                       Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
-                      When enabled, prevents fallback to user space proxy. Defaults to `true`.
+                      Requires the controller unsafe-workload opt-in. Defaults to `false`.
                     nullable: true
                     type: boolean
                   image:
                     description: |-
-                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
-                      must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
-                      controller.
+                      The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
+                      An explicit value requires the controller unsafe-workload opt-in. The image must have
+                      BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
                     nullable: true
                     type: string
                   managementUrl:
@@ -397,7 +402,8 @@ spec:
                     type: string
                   upCommand:
                     description: |-
-                      The command to run alias to `netbird up` in the container. Defaults to
+                      The command to run alias to `netbird up` in the container. An explicit value requires
+                      the controller unsafe-workload opt-in. Defaults to
                       [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
                     type: string

@@ -47,6 +47,8 @@ pub struct CloudflareState {
 /// Credential values are private to the controller namespace and must never be logged.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BindingData {
+    pub workload_namespace: String,
+    pub workload_owner: Option<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>,
     pub service: Service,
     pub class: ClassSnapshot,
     pub credentials: BTreeMap<String, String>,

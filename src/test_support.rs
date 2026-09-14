@@ -71,6 +71,8 @@ pub fn context(client: Client) -> ReconcileContext {
                 "uid":"12345678-1234-1234-1234-123456789012", "resourceVersion":"1"}}))
             .unwrap(),
             data: BindingData {
+                workload_namespace: "apps".into(),
+                workload_owner: Some(serde_json::from_value(json!({"apiVersion":"v1","kind":"ConfigMap","name":"owner","uid":"owner-uid","controller":true,"blockOwnerDeletion":true})).unwrap()),
                 service: serde_json::from_value(json!({"metadata":{"name":"api", "namespace":"apps",
                     "uid":"service-uid", "resourceVersion":"1"}, "spec":{"type":"LoadBalancer",
                     "clusterIP":"10.0.0.1", "loadBalancerClass":"tlb.io/public", "ports":[{"port":80}]}}))

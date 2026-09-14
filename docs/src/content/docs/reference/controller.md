@@ -18,7 +18,9 @@ From a development checkout, use `cargo run --locked -- crds` to generate the CR
 
 | Variable        | Default                    | Purpose                                                                            |
 | --------------- | -------------------------- | ---------------------------------------------------------------------------------- |
-| `POD_NAMESPACE` | `tlb-system`               | Private journal and leadership Lease namespace; set from the Pod namespace by Helm |
+| `POD_NAMESPACE` | `kube-system`               | Private journal and leadership Lease namespace; set from the Pod namespace by the Downward API |
+| `TLB_WORKLOAD_NAMESPACE` | `POD_NAMESPACE` | Namespace for tunnel workloads and runtime Secrets |
+| `TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES` | `false` | Allow custom images, commands and eBPF capabilities in a separate workload namespace |
 | `RUST_LOG`      | `info`                     | Rust log filtering, for example `info,controller=debug`                            |
 | `KUBECONFIG`    | Kubernetes client defaults | Kubeconfig for local execution; in-cluster Pods use their ServiceAccount           |
 
@@ -32,8 +34,7 @@ refreshes external state every five minutes by default. Settled classes, journal
 events. Running Quick Tunnels awaiting a URL retry after five seconds; failed API and peer-address reads use bounded
 error retries. Journal and Service events drive class and orphan cleanup.
 
-Set `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` to a positive integer to configure external refreshes. The Helm value is
-`externalRefreshIntervalSeconds` (default `300`). This interval does not delay Kubernetes watch events or error retries.
+Set `TLB_EXTERNAL_REFRESH_INTERVAL_SECONDS` to a positive integer to configure external refreshes (default `300`). This interval does not delay Kubernetes watch events or error retries.
 
 - Up to 16 Service reconciliations run concurrently.
 - A UID lock serializes work for one Service and its private journal.
@@ -65,6 +66,8 @@ readiness and Service status.
 | ------------------------------- | ---------------------------------------------------- |
 | `controller.tlb.io/binding-uid` | Private binding identity on managed tunnel resources |
 | `controller.tlb.io/service-uid` | Originating Service instance                         |
+| `controller.tlb.io/service-namespace` | Application namespace for diagnostics |
+| `controller.tlb.io/workload-owner` | Binding UID on separate workload owner ConfigMaps |
 | `controller.tlb.io/class-uid`   | Resolved class instance                              |
 | `controller.tlb.io/provider`    | `cloudflare` or `netbird` on tunnel resources        |
 | `controller.tlb.io/journal`     | `true` on private binding Secrets                    |

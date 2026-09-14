@@ -405,3 +405,85 @@ mod tests {
         assert!(validate_service(&service, &ctx.binding.data.class).is_err());
     }
 }
+
+/// Operator policy for all class-selected workloads.
+#[derive(Clone, Debug)]
+pub struct WorkloadPolicy {
+    pub namespace: String,
+    pub allow_unsafe_overrides: bool,
+}
+
+impl WorkloadPolicy {
+    pub fn new(controller_namespace: &str, namespace: Option<String>, allow_unsafe_overrides: bool) -> Result<Self> {
+        if !dns_label(controller_namespace) {
+            return Err(invalid("invalid controller namespace"));
+        }
+        if allow_unsafe_overrides
+            && namespace
+                .as_deref()
+                .is_none_or(|ns| ns == controller_namespace || ns == "kube-system")
+        {
+            return Err(invalid(
+                "unsafe workload overrides require an explicit workload namespace different from the controller namespace and kube-system",
+            ));
+        }
+        let namespace = namespace.unwrap_or_else(|| controller_namespace.into());
+        if !dns_label(&namespace) {
+            return Err(invalid("invalid workload namespace"));
+        }
+        Ok(Self {
+            namespace,
+            allow_unsafe_overrides,
+        })
+    }
+
+    pub fn validate(&self, class: &ClassSnapshot) -> Result<()> {
+        let unsafe_override = class.spec.cloudflare.as_ref().is_some_and(|c| c.image.is_some())
+            || class.spec.netbird.as_ref().is_some_and(|c| {
+                c.image.is_some() || c.up_command.is_some() || c.enable_ebpf_capabilities == Some(true)
+            });
+        if unsafe_override && !self.allow_unsafe_overrides {
+            return Err(invalid(
+                "custom images, commands and eBPF capabilities require TLB_ALLOW_UNSAFE_WORKLOAD_OVERRIDES=true and a dedicated workload namespace",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unsafe_policy_requires_explicit_separate_namespace() {
+        assert_eq!(
+            WorkloadPolicy::new("kube-system", None, false).unwrap().namespace,
+            "kube-system"
+        );
+        for namespace in [None, Some("kube-system".into()), Some("controller".into())] {
+            assert!(WorkloadPolicy::new("controller", namespace, true).is_err());
+        }
+        assert!(WorkloadPolicy::new("kube-system", Some("tunnels".into()), true).is_ok());
+        assert!(WorkloadPolicy::new("kube-system", Some("".into()), false).is_err());
+    }
+
+    #[test]
+    fn both_class_kinds_require_opt_in_for_each_unsafe_field() {
+        let restricted = WorkloadPolicy::new("kube-system", None, false).unwrap();
+        let permitted = WorkloadPolicy::new("kube-system", Some("tunnels".into()), true).unwrap();
+        for namespaced in [true, false] {
+            for spec in [
+                json!({"cloudflare":{"image":"cloudflare/cloudflared:latest"}}),
+                json!({"netbird":{"managementUrl":"https://netbird.example.com","setupKeyRef":{"name":"key","key":"key"},"image":"netbirdio/netbird:latest"}}),
+                json!({"netbird":{"managementUrl":"https://netbird.example.com","setupKeyRef":{"name":"key","key":"key"},"upCommand":"netbird up"}}),
+                json!({"netbird":{"managementUrl":"https://netbird.example.com","setupKeyRef":{"name":"key","key":"key"},"enableEbpfCapabilities":true}}),
+            ] {
+                let class: ClassSnapshot = serde_json::from_value(json!({"metadata":{"name":"test","namespace":"apps","uid":"class"},"namespaced":namespaced,"spec":spec})).unwrap();
+                assert!(restricted.validate(&class).is_err());
+                assert!(permitted.validate(&class).is_ok());
+            }
+        }
+    }
+}

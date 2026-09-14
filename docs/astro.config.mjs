@@ -35,7 +35,7 @@ export default defineConfig({
           items: [
             { label: "Tunnel classes", slug: "reference/classes" },
             { label: "Service annotations", slug: "reference/annotations" },
-            { label: "Helm values", slug: "reference/helm" },
+            { label: "Deployment configuration", slug: "reference/deployment" },
             { label: "Controller and CLI", slug: "reference/controller" },
           ],
         },

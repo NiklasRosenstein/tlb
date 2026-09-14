@@ -43,6 +43,7 @@ pub struct CloudflareConfig {
     /// Cloudflare account ID. Required for API mode, ignored for Quick mode.
     pub account_id: Option<String>,
     /// The cloudflared image to use for the tunnel pods. Defaults to `cloudflare/cloudflared:latest`.
+    /// An explicit value requires the controller unsafe-workload opt-in.
     pub image: Option<String>,
     /// Edge transport. Use HTTP/2 when outbound UDP is unavailable.
     #[serde(default)]
@@ -110,15 +111,16 @@ pub struct NetbirdConfig {
     /// name specified in the annotation is suffixed with this domain, it will be stripped as
     /// Netbird will automatically append it.
     pub netbird_dns_domain: Option<String>,
-    /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`. Note that the image
-    /// must have `nc` installed that is BusyBox compatible, as it is used to export the Netbird peer IP to the
-    /// controller.
+    /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
+    /// An explicit value requires the controller unsafe-workload opt-in. The image must have
+    /// BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
     pub image: Option<String>,
     /// The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
     pub cluster_interface: Option<String>,
     /// The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
     pub netbird_interface: Option<String>,
-    /// The command to run alias to `netbird up` in the container. Defaults to
+    /// The command to run alias to `netbird up` in the container. An explicit value requires
+    /// the controller unsafe-workload opt-in. Defaults to
     /// [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
     pub up_command: Option<String>,
     /// How to register the Netbird tunnel in the Service's `loadBalancerStatus`. Defaults to
@@ -133,7 +135,7 @@ pub struct NetbirdConfig {
     /// classes have a minimum size, so you might need to adjust this value.
     pub size: Option<String>,
     /// Enable eBPF capabilities (SYS_ADMIN and SYS_RESOURCE) for the NetBird container.
-    /// When enabled, prevents fallback to user space proxy. Defaults to `true`.
+    /// Requires the controller unsafe-workload opt-in. Defaults to `false`.
     pub enable_ebpf_capabilities: Option<bool>,
 }
 

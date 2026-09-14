@@ -9,7 +9,7 @@ name = "controller"
 path = "src/main.rs"
 
 [[example]]
-name = "quick-tunnel-e2e"
+name = "e2e"
 test = true
 
 [dependencies]

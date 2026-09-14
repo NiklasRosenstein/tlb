@@ -71,7 +71,7 @@ application's selected Pods.
 ## `tlb.io/node-selector`
 
 Comma-separated `key=value` labels, for example `"disktype=ssd,region=west"`. The labels restrict **tunnel Pods**, not
-the controller or application Pods. Use the Helm `nodeSelector` value for the controller.
+the controller or application Pods. Patch the controller Deployment’s `nodeSelector` to place the controller.
 
 ## `tlb.io/map-ports`
 
