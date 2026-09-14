@@ -548,7 +548,10 @@ async fn journal_reconcile(secret: Arc<Secret>, data: Arc<Data>) -> Result<Actio
 }
 
 async fn class_cleanup(class: &ClassSnapshot, data: &Data) -> Result<bool> {
-    let selector = ListParams::default().labels(&format!("{CLASS_UID_LABEL}={}", required_uid(&class.metadata)?));
+    let selector = ListParams::default().labels(&format!(
+        "{JOURNAL_LABEL}=true,{CLASS_UID_LABEL}={}",
+        required_uid(&class.metadata)?
+    ));
     let journals = data.journals().list(&selector).await?;
     let pending = !journals.items.is_empty();
     for secret in journals {
@@ -585,6 +588,16 @@ async fn class_cleanup(class: &ClassSnapshot, data: &Data) -> Result<bool> {
     Ok(!pending)
 }
 
+async fn bounded_class_reconcile(future: impl std::future::Future<Output = Result<Action>>) -> Result<Action> {
+    tokio::time::timeout(Duration::from_secs(30), future)
+        .await
+        .unwrap_or_else(|_| {
+            Err(Error::UnexpectedError(
+                "Class reconciliation exceeded 30 seconds".into(),
+            ))
+        })
+}
+
 async fn namespaced_class(class: Arc<TunnelClass>, data: Arc<Data>) -> Result<Action> {
     let api = Api::namespaced(
         data.client.clone(),
@@ -606,6 +619,7 @@ async fn namespaced_class(class: Arc<TunnelClass>, data: Arc<Data>) -> Result<Ac
             managed::set_finalizer(&api, &*class, CLASS_FINALIZER, false).await?;
             return Ok(Action::await_change());
         }
+        return Ok(Action::requeue(Duration::from_secs(2)));
     } else {
         managed::set_finalizer(&api, &*class, CLASS_FINALIZER, true).await?;
     }
@@ -627,6 +641,7 @@ async fn cluster_class(class: Arc<ClusterTunnelClass>, data: Arc<Data>) -> Resul
             managed::set_finalizer(&api, &*class, CLASS_FINALIZER, false).await?;
             return Ok(Action::await_change());
         }
+        return Ok(Action::requeue(Duration::from_secs(2)));
     } else {
         managed::set_finalizer(&api, &*class, CLASS_FINALIZER, true).await?;
     }
@@ -925,7 +940,11 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
                     .collect::<Vec<_>>()
             },
         )
-        .run(namespaced_class, retry, data.clone())
+        .run(
+            |class, data| bounded_class_reconcile(namespaced_class(class, data)),
+            retry,
+            data.clone(),
+        )
         .map(controller_result)
         .try_for_each(|_| async { Ok(()) });
     let clusters = cluster_controller
@@ -944,7 +963,11 @@ async fn controllers(data: Arc<Data>, ready: Arc<AtomicBool>) {
                     .collect::<Vec<_>>()
             },
         )
-        .run(cluster_class, retry, data)
+        .run(
+            |class, data| bounded_class_reconcile(cluster_class(class, data)),
+            retry,
+            data,
+        )
         .map(controller_result)
         .try_for_each(|_| async { Ok(()) });
     let readiness = async {
@@ -1150,6 +1173,120 @@ mod tests {
             assert!(error.to_string().contains("Cloudflare accepts one port mapping"));
             assert_eq!(requests.lock().unwrap().len(), 4);
         }
+    }
+
+    #[tokio::test]
+    async fn class_cleanup_filters_runtime_secrets_and_requeues_until_journals_are_gone() {
+        use kube::client::Body;
+        use std::sync::atomic::AtomicBool;
+        for namespaced in [true, false] {
+            let mut snapshot = class();
+            snapshot.namespaced = namespaced;
+            snapshot.metadata.resource_version = Some("1".into());
+            snapshot.metadata.finalizers = Some(vec![CLASS_FINALIZER.into(), "other.io/hold".into()]);
+            snapshot.metadata.deletion_timestamp = Some(serde_json::from_value(json!("2026-01-01T00:00:00Z")).unwrap());
+            if !namespaced {
+                snapshot.metadata.namespace = None;
+            }
+            let binding = json!({
+                "service":{"metadata":{"name":"api","namespace":"apps","uid":"service-uid"}},
+                "class":snapshot,"credentials":{},"workload_namespace":"kube-system","cleaning":true
+            });
+            let journal = serde_json::to_value(Secret {
+                metadata: serde_json::from_value(json!({"name":"tlb-service-uid","namespace":"tlb-system",
+                    "labels":{JOURNAL_LABEL:"true",CLASS_UID_LABEL:"class-uid",SERVICE_UID_LABEL:"service-uid"}}))
+                .unwrap(),
+                data: Some(BTreeMap::from([(
+                    "binding.json".into(),
+                    k8s_openapi::ByteString(serde_json::to_vec(&binding).unwrap()),
+                )])),
+                ..Default::default()
+            })
+            .unwrap();
+            let pending = Arc::new(AtomicBool::new(true));
+            let still_pending = pending.clone();
+            let client = kube::Client::new(
+                tower::service_fn(move |request: http::Request<Body>| {
+                    let journal = journal.clone();
+                    let pending = still_pending.load(Ordering::SeqCst);
+                    async move {
+                        let path = request.uri().path();
+                        let response = if path.ends_with("/secrets") {
+                            let url = reqwest::Url::parse(&format!("http://kube{}", request.uri())).unwrap();
+                            let selector = url
+                                .query_pairs()
+                                .find(|(key, _)| key == "labelSelector")
+                                .unwrap()
+                                .1
+                                .into_owned();
+                            assert!(
+                                selector.split(',').any(|s| s == format!("{JOURNAL_LABEL}=true")),
+                                "runtime copies share the class UID but are not journals"
+                            );
+                            assert!(selector.split(',').any(|s| s == format!("{CLASS_UID_LABEL}=class-uid")));
+                            json!({"apiVersion":"v1","kind":"SecretList","metadata":{},"items":if pending {vec![journal]} else {vec![]}})
+                        } else if path.ends_with("/services") {
+                            json!({"apiVersion":"v1","kind":"ServiceList","metadata":{},"items":[]})
+                        } else {
+                            assert_eq!(request.method(), "PATCH");
+                            let body = request.into_body().collect_bytes().await.unwrap();
+                            let patch: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                            assert_eq!(patch["metadata"]["uid"], "class-uid");
+                            assert_eq!(patch["metadata"]["resourceVersion"], "1");
+                            assert_eq!(patch["metadata"]["finalizers"], json!(["other.io/hold"]));
+                            json!({"metadata":{"name":"public"},"spec":{}})
+                        };
+                        Ok::<_, std::io::Error>(
+                            http::Response::builder()
+                                .status(200)
+                                .body(Body::from(serde_json::to_vec(&response).unwrap()))
+                                .unwrap(),
+                        )
+                    }
+                }),
+                "default",
+            );
+            let data = Arc::new(Data {
+                dns_lock: Default::default(),
+                external_refresh: Duration::from_secs(300),
+                events: SimpleEventRecorder::from_client(client.clone(), "test"),
+                client,
+                namespace: "tlb-system".into(),
+                workload_policy: tlb::config::WorkloadPolicy::new("tlb-system", None, false).unwrap(),
+                locks: Default::default(),
+                bindings: Default::default(),
+                failures: Default::default(),
+            });
+            for unfinished in [true, false] {
+                pending.store(unfinished, Ordering::SeqCst);
+                let value = json!({"metadata":snapshot.metadata,"spec":{}});
+                let action = if namespaced {
+                    namespaced_class(Arc::new(serde_json::from_value(value).unwrap()), data.clone()).await
+                } else {
+                    cluster_class(Arc::new(serde_json::from_value(value).unwrap()), data.clone()).await
+                }
+                .unwrap();
+                assert_eq!(
+                    action,
+                    if unfinished {
+                        Action::requeue(Duration::from_secs(2))
+                    } else {
+                        Action::await_change()
+                    }
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stalled_class_reconciliation_returns_an_error_for_retry() {
+        let result = bounded_class_reconcile(std::future::pending()).await;
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Class reconciliation exceeded 30 seconds")
+        );
     }
 
     #[test]

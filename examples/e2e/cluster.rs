@@ -166,6 +166,15 @@ impl Cluster {
                 }
             }
         }
+        for kind in ["Service", "TunnelClass", "ClusterTunnelClass"] {
+            if let Ok(objects) = k.list(kind, "", "").await {
+                let metadata: Vec<_> = objects.iter().map(|o| &o["metadata"]).collect();
+                let _ = std::fs::write(
+                    directory.join(format!("{kind}-metadata.json")),
+                    self.redact(&serde_json::to_string_pretty(&metadata).unwrap_or_default()),
+                );
+            }
+        }
         if let Ok(events) = k.list("Event", "", "").await {
             let _ = std::fs::write(
                 directory.join("events.json"),
