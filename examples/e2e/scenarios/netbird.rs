@@ -22,6 +22,17 @@ async fn api(c: &Cluster, path: &str, body: Value, token: Option<&str>) -> Resul
         &c.exec(NS, "tools", "tools", &["python3", "-c", &code]).await?,
     )?)
 }
+async fn peer_request(c: &Cluster, method: &str, path: &str, token: &str) -> Result<Value> {
+    let script = format!(
+        "import json,urllib.request\nrequest=urllib.request.Request({:?},method={method:?},headers={{'Authorization':{:?}}})\nprint(json.dumps(json.loads(urllib.request.urlopen(request,timeout=10).read() or b'null')))",
+        format!("{URL}/api/peers{path}"),
+        format!("Token {token}")
+    );
+    Ok(serde_json::from_str(
+        &c.exec(NS, "tools", "tools", &["python3", "-c", &script]).await?,
+    )?)
+}
+
 async fn pod_ready(k: &Kubernetes, pod: &str) -> Result<()> {
     wait(&format!("{pod} ready"), 120, async || {
         Ok(ready(&k.get("Pod", NS, pod).await?))
@@ -161,7 +172,7 @@ socketserver.ThreadingUDPServer(('0.0.0.0',9000),UDP).serve_forever()
         "TunnelClass",
         NS,
         "netbird",
-        json!({"spec":{"netbird":{"managementUrl":URL,"setupKeyRef":{"name":"setup","key":"key"}}}}),
+        json!({"spec":{"netbird":{"managementUrl":URL,"setupKeyRef":{"name":"setup","key":"key"},"storageClass":"standard"}}}),
     ))
     .await?;
     let service=k.apply(object("Service",NS,"origin",json!({"metadata":{"annotations":{"tlb.io/map-ports":"18080:tcp,18443/tls:tcp,19000:udp","tlb.io/tls-secret-name":"tls"}},"spec":{"type":"LoadBalancer","loadBalancerClass":"tlb.io/netbird","selector":{"app":"origin"},"ports":[{"name":"tcp","port":8080},{"name":"udp","port":9000,"protocol":"UDP"}]}}))).await?;
@@ -189,6 +200,53 @@ socketserver.ThreadingUDPServer(('0.0.0.0',9000),UDP).serve_forever()
             "userspace proxy not selected"
         );
     }
+    let pods = k.list("Pod", SYSTEM, &selector(&service)).await?;
+    ensure!(pods.len() == 1, "expected one tunnel pod");
+    let tunnel = &pods[0];
+    let restarts = tunnel["status"]["containerStatuses"][0]["restartCount"]
+        .as_u64()
+        .unwrap_or(0);
+    let peers = peer_request(c, "GET", "", token).await?;
+    let peer = entries(&peers)
+        .iter()
+        .find(|p| p["ip"] == address)
+        .context("registered tunnel peer")?;
+    let peer_id = peer["id"].as_str().context("peer id")?;
+    peer_request(c, "DELETE", &format!("/{peer_id}"), token).await?;
+    wait("deleted registration makes the tunnel unready", 60, async || {
+        Ok(!ready(&k.get("Pod", SYSTEM, name(tunnel)).await?))
+    })
+    .await?;
+    wait("unready tunnel address is withdrawn", 60, async || {
+        Ok(entries(&k.get("Service", NS, "origin").await?["status"]["loadBalancer"]["ingress"]).is_empty())
+    })
+    .await?;
+    wait(
+        "liveness restarts and re-enrolls the same pod with persisted identity",
+        240,
+        async || {
+            let current = k.get("Pod", SYSTEM, name(tunnel)).await?;
+            ensure!(uid(&current) == uid(tunnel), "recovery must not replace the pod or PVC");
+            Ok(ready(&current)
+                && current["status"]["containerStatuses"][0]["restartCount"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    > restarts)
+        },
+    )
+    .await?;
+    wait("re-enrolled peer is announced and forwards traffic", 120, async || {
+        let current = k.get("Service", NS, "origin").await?;
+        let Some(ip) = current["status"]["loadBalancer"]["ingress"][0]["ip"].as_str() else {
+            return Ok(false);
+        };
+        let peers = peer_request(c, "GET", "", token).await?;
+        if !entries(&peers).iter().any(|p| p["ip"] == ip && p["id"] != peer_id) {
+            return Ok(false);
+        }
+        probe(c, "direct-peer", ip).await
+    })
+    .await?;
     k.delete("Service", NS, "origin").await?;
     wait(
         "real tunnel cleanup removes runtime Secrets and journal",

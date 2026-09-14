@@ -1,0 +1,8 @@
+#!/bin/sh
+# DNS fixture: mimic NetBird health without enrolling in a real management server.
+[ "$1" = status ] && [ "$2" = --check ] || exit 1
+case "$3" in
+    live|ready) exit 0 ;;
+    startup) ip -4 addr show wt0 2>/dev/null | grep -q 'inet ' ;;
+    *) exit 1 ;;
+esac

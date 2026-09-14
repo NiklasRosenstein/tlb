@@ -32,7 +32,25 @@ use crate::{
 const DEFAULT_CLUSTER_INTERFACE: &str = "eth0";
 const DEFAULT_NETBIRD_INTERFACE: &str = "wt0";
 const DEFAULT_NETBIRD_IMAGE: &str = "netbirdio/netbird:latest";
-pub const DEFAULT_NETBIRD_UP_COMMAND: &str = "/usr/local/bin/netbird up -F -l=warn --disable-dns";
+pub const DEFAULT_NETBIRD_UP_COMMAND: &str =
+    "exec env NB_LOG_LEVEL=warn NB_DISABLE_DNS=true /usr/local/bin/netbird-entrypoint.sh";
+
+fn netbird_probe(check: &str, period: i32, failures: i32) -> k8s_openapi::api::core::v1::Probe {
+    k8s_openapi::api::core::v1::Probe {
+        exec: Some(k8s_openapi::api::core::v1::ExecAction {
+            command: Some(vec![
+                "/usr/local/bin/netbird".into(),
+                "status".into(),
+                "--check".into(),
+                check.into(),
+            ]),
+        }),
+        period_seconds: Some(period),
+        timeout_seconds: Some(5),
+        failure_threshold: Some(failures),
+        ..Default::default()
+    }
+}
 
 /// Resolves a port mapping to actual port number and protocol
 fn resolve_port_mapping(mapping: &crate::PortMapping, ports: &[ServicePort]) -> Result<(i32, String)> {
@@ -149,18 +167,12 @@ fn get_netbird_launch_script(
         });
     }
 
-    // Wait for an IPv4 address before exposing it; interface creation precedes address assignment.
+    // socat runs the address lookup after accepting each connection, including after re-enrollment.
     launch_script.push(format!(
-        "( \
-            while peer_ip=$(ip -4 addr show {netbird_iface} 2>/dev/null | grep 'inet ' | awk '{{print $2}}' | cut -d'/' -f1 | head -n1); [ -z \"$peer_ip\" ]; do \
-                echo \"[peer-ip-server] Waiting for {netbird_iface} to come up...\"; \
-                sleep 1; \
-            done; \
-            echo \"[peer-ip-server] {netbird_iface} is up with ip $peer_ip, serving on port {NETBIRD_PEER_IP_PORT}...\"; \
-            while true; do \
-                echo \"$peer_ip\" | nc -l -p {NETBIRD_PEER_IP_PORT}; \
-            done \
-        ) &"
+        "cat > /tmp/tlb-peer-ip.sh <<'TLB_PEER_IP'\n\
+         ip -4 addr show {netbird_iface} 2>/dev/null | awk '/inet / {{ split($2, addr, \"/\"); print addr[1]; exit }}'\n\
+         TLB_PEER_IP\n\
+         socat TCP-LISTEN:{NETBIRD_PEER_IP_PORT},fork,reuseaddr EXEC:'/bin/sh /tmp/tlb-peer-ip.sh' &"
     ));
 
     launch_script.push("children=\"$children $!\"".into());
@@ -468,19 +480,16 @@ impl TunnelProvider for NetbirdConfig {
                     container_port: NETBIRD_PEER_IP_PORT.into(),
                     ..Default::default()
                 }]),
-                readiness_probe: Some(k8s_openapi::api::core::v1::Probe {
-                    exec: Some(k8s_openapi::api::core::v1::ExecAction {
-                        command: Some(
-                            vec!["ip", "addr", "show", &netbird_interface]
-                                .into_iter()
-                                .map(|s| s.into())
-                                .collect(),
-                        ),
-                    }),
-                    initial_delay_seconds: Some(5),
-                    period_seconds: Some(30),
-                    ..Default::default()
-                }),
+                // NetBird check names are intentionally cross-wired to Kubernetes probe kinds:
+                //   k8s startup   -> netbird `live`    (daemon socket reachable)
+                //   k8s readiness -> netbird `startup` (management/signal/relay connected)
+                //   k8s liveness  -> netbird `ready`   (authenticated; NeedsLogin/LoginFailed/
+                //                                       SessionExpired fail, Connecting/Idle pass)
+                // Authentication failures require a fresh `up` with the setup key; Connecting/Idle
+                // stay live so a management outage does not repeatedly restart the tunnel.
+                startup_probe: Some(netbird_probe("live", 2, 30)),
+                liveness_probe: Some(netbird_probe("ready", 10, 6)),
+                readiness_probe: Some(netbird_probe("startup", 5, 1)),
                 ..Default::default()
             }],
             ..Default::default()
