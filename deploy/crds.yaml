@@ -140,8 +140,8 @@ spec:
                   image:
                     description: |-
                       The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
-                      An explicit value requires the controller unsafe-workload opt-in. The image must have
-                      BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
+                      An explicit value requires the controller unsafe-workload opt-in.
+                      NetBird daemon health checks (`status --check live|ready|startup`) and `socat` are required.
                     nullable: true
                     type: string
                   managementUrl:
@@ -192,7 +192,8 @@ spec:
                     type: string
                   upCommand:
                     description: |-
-                      The command to run alias to `netbird up` in the container. An explicit value requires
+                      The long-running command that starts the NetBird daemon and authenticates with the setup key.
+                      It must expose the daemon socket for health checks. An explicit value requires
                       the controller unsafe-workload opt-in. Defaults to
                       [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true
@@ -350,8 +351,8 @@ spec:
                   image:
                     description: |-
                       The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
-                      An explicit value requires the controller unsafe-workload opt-in. The image must have
-                      BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
+                      An explicit value requires the controller unsafe-workload opt-in.
+                      NetBird daemon health checks (`status --check live|ready|startup`) and `socat` are required.
                     nullable: true
                     type: string
                   managementUrl:
@@ -402,7 +403,8 @@ spec:
                     type: string
                   upCommand:
                     description: |-
-                      The command to run alias to `netbird up` in the container. An explicit value requires
+                      The long-running command that starts the NetBird daemon and authenticates with the setup key.
+                      It must expose the daemon socket for health checks. An explicit value requires
                       the controller unsafe-workload opt-in. Defaults to
                       [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
                     nullable: true

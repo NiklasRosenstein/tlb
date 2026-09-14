@@ -252,11 +252,18 @@ pub async fn run(c: &Cluster, image: &str) -> Result<()> {
         &[
             "sh",
             "-c",
-            "ip link add wt0 type dummy; ip addr add 100.64.0.11/32 dev wt0; ip link set wt0 up",
+            "ip link add wt0 type dummy; ip addr add 100.64.0.42/32 dev wt0; ip link set wt0 up",
         ],
     )
     .await?;
-    dns(c, &["explicit"], BOTH, "readiness recovery restores peer address", 120).await?;
+    dns(
+        c,
+        &["explicit"],
+        &["100.64.0.10", "100.64.0.42"],
+        "readiness recovery publishes the changed peer address",
+        120,
+    )
+    .await?;
     k.annotations(NS, "ingress", json!({"tlb.io/replicas":"1"})).await?;
     dns(
         c,

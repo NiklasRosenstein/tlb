@@ -112,14 +112,15 @@ pub struct NetbirdConfig {
     /// Netbird will automatically append it.
     pub netbird_dns_domain: Option<String>,
     /// The netbird image to use for the tunnel pods. Defaults to `netbirdio/netbird:latest`.
-    /// An explicit value requires the controller unsafe-workload opt-in. The image must have
-    /// BusyBox-compatible `nc` installed to export the Netbird peer IP to the controller.
+    /// An explicit value requires the controller unsafe-workload opt-in.
+    /// NetBird daemon health checks (`status --check live|ready|startup`) and `socat` are required.
     pub image: Option<String>,
     /// The cluster interface that handles outgoing traffic into the target service. Defaults to `eth0`.
     pub cluster_interface: Option<String>,
     /// The netbird interface that is created by running `netbird up` in the container. Defaults to `wt0`.
     pub netbird_interface: Option<String>,
-    /// The command to run alias to `netbird up` in the container. An explicit value requires
+    /// The long-running command that starts the NetBird daemon and authenticates with the setup key.
+    /// It must expose the daemon socket for health checks. An explicit value requires
     /// the controller unsafe-workload opt-in. Defaults to
     /// [`crate::netbird::DEFAULT_NETBIRD_UP_COMMAND`].
     pub up_command: Option<String>,

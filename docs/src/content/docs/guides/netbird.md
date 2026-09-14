@@ -82,6 +82,25 @@ deleting the running workload.
 Deleting the Service also deletes its managed claims after workload cleanup. TLB does not call NetBird's management API
 to delete peer registrations; manage retired peers through NetBird when needed.
 
+## Health and re-enrollment
+
+The default launch command runs the official NetBird container entrypoint, exposing its local daemon socket.
+Images and custom `upCommand` values must support `netbird status --check live|ready|startup`; foreground
+`netbird up -F` does not expose that socket. The default image supplies the entrypoint and health checks.
+
+The startup probe allows up to 60 seconds for the daemon to respond. Readiness checks management, signal, and
+configured relay connectivity every five seconds. Unready peers are excluded from Service addresses and custom DNS.
+The IP responder reads the current interface address for every request, including after re-enrollment.
+
+Liveness checks authentication every ten seconds. Six consecutive failures restart the container, running `up` again
+with the mounted setup key. `NeedsLogin`, `LoginFailed`, and `SessionExpired` fail this check; `Connecting` and `Idle`
+do not, so temporary management outages do not cause restart loops. Recovery requires a valid reusable setup key with
+remaining enrollment capacity. PVC data is preserved during container restarts.
+
+Setup keys with ephemeral peers enabled let NetBird remove registrations after ten minutes offline. Returning peers
+can re-enroll through this restart path; newly assigned IPs are discovered and published by TLB. An expired or revoked
+setup key requires operator intervention.
+
 ## DNS names and replicas
 
 ```yaml
