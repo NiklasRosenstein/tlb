@@ -172,7 +172,7 @@ spec:
       serviceAccountName: tlb-controller
       containers:
         - name: tlb-controller
-          image: "ghcr.io/niklasrosenstein/tlb:0.7.1"
+          image: "ghcr.io/niklasrosenstein/tlb:0.7.2"
           imagePullPolicy: IfNotPresent
           env:
             - name: POD_NAMESPACE
