@@ -480,8 +480,13 @@ impl TunnelProvider for NetbirdConfig {
                     container_port: NETBIRD_PEER_IP_PORT.into(),
                     ..Default::default()
                 }]),
-                // Authentication failures require a fresh `up` with the setup key. Connecting/Idle
-                // remain live so a management outage does not repeatedly restart the tunnel.
+                // NetBird check names are intentionally cross-wired to Kubernetes probe kinds:
+                //   k8s startup   -> netbird `live`    (daemon socket reachable)
+                //   k8s readiness -> netbird `startup` (management/signal/relay connected)
+                //   k8s liveness  -> netbird `ready`   (authenticated; NeedsLogin/LoginFailed/
+                //                                       SessionExpired fail, Connecting/Idle pass)
+                // Authentication failures require a fresh `up` with the setup key; Connecting/Idle
+                // stay live so a management outage does not repeatedly restart the tunnel.
                 startup_probe: Some(netbird_probe("live", 2, 30)),
                 liveness_probe: Some(netbird_probe("ready", 10, 6)),
                 readiness_probe: Some(netbird_probe("startup", 5, 1)),
