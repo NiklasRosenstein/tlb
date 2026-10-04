@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: jdx/mise-action@v4.3.0
+      - uses: jdx/mise-action@v5.0.1
       - run: mise run ci
 
   kubernetes:
@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: jdx/mise-action@v4.3.0
+      - uses: jdx/mise-action@v5.0.1
       - run: mise run e2e -- all
       - name: Preserve failure diagnostics
         if: failure()
