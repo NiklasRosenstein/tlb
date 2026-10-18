@@ -1,4 +1,4 @@
-FROM clux/muslrust:1.98.1-stable AS build
+FROM clux/muslrust:1.99.0-stable AS build
 # Use the image's toolchain, which includes its musl target.
 ENV RUSTUP_TOOLCHAIN=stable
 RUN --mount=type=bind,source=./,target=/volume \
