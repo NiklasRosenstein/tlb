@@ -1,6 +1,6 @@
 [tools]
 rust = { version = "1.98.1", components = "rustfmt,clippy" }
-deno = "2.9.6"
+deno = "2.9.8"
 
 # Type checking
 
