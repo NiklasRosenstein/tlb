@@ -1,4 +1,4 @@
-FROM python:3.14-alpine3.23
+FROM python:3.15-alpine3.23
 RUN apk add --no-cache iproute2 socat
 COPY api.py /test/api.py
 COPY netbird /usr/local/bin/netbird
