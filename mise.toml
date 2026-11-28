@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "1.98.1", components = "rustfmt,clippy" }
+rust = { version = "1.100.1", components = "rustfmt,clippy" }
 deno = "2.9.8"
 
 # Type checking
